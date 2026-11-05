@@ -21,7 +21,7 @@ import tty
 
 AGENTS = {
     "copilot": ("Copilot", "\033[38;5;141m"),
-    "codex": ("Codex", "\033[38;5;78m"),
+    "codex": ("Codex", "\033[38;5;75m"),
     "claude": ("Claude", "\033[38;5;209m"),
 }
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
