@@ -7,11 +7,15 @@ cup for every AI coding agent you have running.
 
 - **Keeps the Mac awake** until you quit (`caffeinate -dimsu` under the hood).
 - **One cup per agent session.** Copilot CLI, Codex CLI and Claude Code sessions
-  running in a terminal show up on the counter. New ones pour in.
-- **Loyalty card.** Every finished session earns a stamp. Ten stamps and you've
-  earned a free (real) coffee.
-- **Menu board.** Lifetime stats per agent: cups served, share of all cups,
-  total brew time and longest session.
+  running in a terminal show up on the counter. New ones pour in, and finished
+  ones drain and get marked as served.
+- **Steam follows the work.** The more CPU an agent uses, the more its cup
+  steams.
+- **A barista cat.** A pixel-art cat with a random name and coat each launch. It
+  walks the counter, checks on new and finished cups, grooms, yawns and naps
+  when things are quiet.
+- **Lots of agents?** Cups shrink to fit the screen. Anything that still
+  doesn't fit is counted below the counter.
 - **Receipt on quit:** time awake, cups served per agent, longest session.
 
 ## Install
@@ -32,26 +36,19 @@ caffe
 
 Press `q` or `Ctrl-C` to close the bar.
 
-```sh
-caffe stats
-```
-
-Prints the lifetime menu board without keeping the Mac awake.
-
 ## How it works
 
-- Every 2 seconds, `ps` is checked for `copilot`, `codex` and `claude` processes
+- Every 3 seconds, `ps` is checked for `copilot`, `codex` and `claude` processes
   attached to a terminal. Background daemons and editor extensions are ignored.
 - `caffeinate` is tied to caffe's process ID, so the Mac can sleep again as soon
   as caffe exits, even if it's killed.
-- Lifetime stats are stored in `~/.local/state/caffe/stats.json` (override with
-  `CAFFE_STATS`).
+- caffe stores nothing on disk. It redraws only the lines that changed and slows
+  its frame rate when nothing is moving, so it uses very little CPU.
 
 ## Uninstall
 
 ```sh
 rm ~/.local/bin/caffe
-rm -rf ~/.local/state/caffe
 ```
 
 ## License
