@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck -s sh install.sh
+      - name: ruff
+        run: |
+          pipx run ruff==0.17.3 check .
+          pipx run ruff==0.17.3 format --check .
+
+  smoke:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compile with system python3
+        run: /usr/bin/python3 -m py_compile caffe
+      - name: Install script
+        run: |
+          sed "s#https://raw.githubusercontent.com/alexgnq/caffe/\${CAFFE_REF:-main}#file://$PWD#" install.sh \
+            | CAFFE_BIN_DIR="$RUNNER_TEMP/bin" sh
+          cmp "$RUNNER_TEMP/bin/caffe" caffe
