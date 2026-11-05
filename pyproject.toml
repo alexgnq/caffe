@@ -1,0 +1,12 @@
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+include = ["caffe", "*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "S", "PL"]
+ignore = [
+  "PLR2004", # magic values: small UI constants read better inline
+  "S311",    # random is only used to pick quips, not for security
+  "S603",    # subprocess calls use fixed absolute paths, no shell
+]

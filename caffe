@@ -5,6 +5,7 @@ Every interactive Copilot CLI / Codex CLI / Claude Code session is a cup on the
 counter. When a session ends, its cup is stamped on the loyalty card.
 Press q (or Ctrl-C) to close the bar and get your receipt.
 """
+
 import json
 import os
 import random
@@ -46,7 +47,12 @@ IDLE_QUIPS = [
     "Counter's clean. Mac's still awake, as you asked.",
 ]
 
-STEAM_FRAMES = [("  ) (  ", " ( ) ) "), (" ( (   ", "  ) ) )"), ("   ) ) ", " ( ( ( "), ("  ( (  ", " ) ) ) ")]
+STEAM_FRAMES = [
+    ("  ) (  ", " ( ) ) "),
+    (" ( (   ", "  ) ) )"),
+    ("   ) ) ", " ( ( ( "),
+    ("  ( (  ", " ) ) ) "),
+]
 
 
 def parse_etime(s):
@@ -69,9 +75,14 @@ def agent_kind(args):
 def scan_agents():
     """Return {pid: (kind, tty, started_at)} for interactive agent sessions."""
     try:
-        out = subprocess.run(["ps", "-axo", "pid=,ppid=,tty=,etime=,args="],
-                             capture_output=True, text=True, timeout=5).stdout
-    except Exception:
+        out = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,ppid=,tty=,etime=,args="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
         return None
     now, found = time.time(), {}
     for line in out.splitlines():
@@ -93,11 +104,18 @@ def fmt_dur(sec):
 
 
 def load_stats():
+    stats = {"lifetime_cups": 0, "free_coffees": 0}
     try:
         with open(STATS) as f:
-            return json.load(f)
-    except Exception:
-        return {"lifetime_cups": 0, "free_coffees": 0}
+            loaded = json.load(f)
+    except (OSError, ValueError):
+        return stats
+    if isinstance(loaded, dict):
+        for key in stats:
+            value = loaded.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                stats[key] = value
+    return stats
 
 
 def save_stats(stats):
@@ -141,8 +159,10 @@ def render(state, frame):
     now = time.time()
     out = []
     awake = fmt_dur(now - state["start"])
-    out.append(f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{awake}{RESET}"
-               f"   {DIM}q to close the bar{RESET}")
+    out.append(
+        f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{awake}{RESET}"
+        f"   {DIM}q to close the bar{RESET}"
+    )
     out.append(DIM + "─" * min(cols, 72) + RESET)
     out.append("")
 
@@ -156,7 +176,7 @@ def render(state, frame):
         cell = 14
         per_row = max(1, (cols - 2) // cell)
         for i in range(0, len(sessions), per_row):
-            chunk = sessions[i:i + per_row]
+            chunk = sessions[i : i + per_row]
             arts, labels, ages = [], [], []
             for pid, (kind, tty_name, started) in chunk:
                 seen = state["first_seen"].get(pid, 0)
@@ -165,18 +185,27 @@ def render(state, frame):
                 arts.append(cup_lines(kind, frame + pid, fill))
                 name, color = AGENTS[kind]
                 labels.append(f"{color}{name}{RESET} {DIM}{tty_name.replace('ttys', 's')}{RESET}")
-                ages.append(f"{DIM}{fmt_dur(now - started)}{RESET}" if fill >= 1 else f"{GOLD}pouring…{RESET}")
+                ages.append(
+                    f"{DIM}{fmt_dur(now - started)}{RESET}"
+                    if fill >= 1
+                    else f"{GOLD}pouring…{RESET}"
+                )
             for line_i in range(5):
                 out.append("  " + "".join(pad(a[line_i], cell) for a in arts))
-            out.append("  " + "".join(pad(l, cell) for l in labels))
+            out.append("  " + "".join(pad(label, cell) for label in labels))
             out.append("  " + "".join(pad(a, cell) for a in ages))
             out.append("")
 
     stamps = state["stats"]["lifetime_cups"] % CARD
     card = "".join(f"{GOLD}●{RESET}" if i < stamps else f"{DIM}○{RESET}" for i in range(CARD))
-    out.append(f"  Loyalty card {card}  {DIM}{stamps}/{CARD}, the next free coffee is on the house{RESET}")
-    out.append(f"  {DIM}On the counter: {len(sessions)}  ·  served this shift: {state['served']}"
-               f"  ·  lifetime: {state['stats']['lifetime_cups']}  ·  free coffees: {state['stats']['free_coffees']}{RESET}")
+    out.append(
+        f"  Loyalty card {card}  {DIM}{stamps}/{CARD}, the next free coffee is on the house{RESET}"
+    )
+    stats = state["stats"]
+    out.append(
+        f"  {DIM}On the counter: {len(sessions)}  ·  served this shift: {state['served']}"
+        f"  ·  lifetime: {stats['lifetime_cups']}  ·  free coffees: {stats['free_coffees']}{RESET}"
+    )
     out.append("")
     if state["toast"] and now < state["toast"][1]:
         out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
@@ -184,7 +213,7 @@ def render(state, frame):
         out.append(f"  {DIM}“{QUIPS[int(now // 8) % len(QUIPS)]}”{RESET}")
 
     out = out[: rows - 1]
-    sys.stdout.write("\033[H" + "\n".join(l + "\033[K" for l in out) + "\033[J")
+    sys.stdout.write("\033[H" + "\n".join(line + "\033[K" for line in out) + "\033[J")
     sys.stdout.flush()
 
 
@@ -234,15 +263,23 @@ def receipt(state):
 
 def start_caffeinate():
     # -w ties caffeinate to our pid, so it stops even if caffe is killed.
-    return subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
+    return subprocess.Popen(["/usr/bin/caffeinate", "-dimsu", "-w", str(os.getpid())])
 
 
 def main():
     if not sys.stdin.isatty():
         sys.exit("caffe needs an interactive terminal.")
     caf = start_caffeinate()
-    state = {"start": time.time(), "live": {}, "first_seen": {}, "served": 0,
-             "longest": (0, ""), "stats": load_stats(), "toast": None, "initialized": False}
+    state = {
+        "start": time.time(),
+        "live": {},
+        "first_seen": {},
+        "served": 0,
+        "longest": (0, ""),
+        "stats": load_stats(),
+        "toast": None,
+        "initialized": False,
+    }
 
     def on_term(*_):
         raise KeyboardInterrupt
