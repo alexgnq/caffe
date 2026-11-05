@@ -51,11 +51,17 @@ caffe
 Press `p` to pet the cat, and `q` or `Ctrl-C` to close the bar. `caffe --help`
 prints a short summary.
 
+To update to the latest version:
+
+```sh
+caffe update
+```
+
 ## How it works
 
 - Every 3 seconds, `ps` is checked for `copilot`, `codex`, `claude` and `pi`
-  processes attached to a terminal. Background daemons and editor extensions
-  are ignored.
+  processes attached to a terminal, and for the Codex, Copilot, Claude and
+  VS Code apps. An app's helpers and agent backends count towards its latte.
 - `caffeinate` is tied to caffe's process ID, so the Mac can sleep again as soon
   as caffe exits, even if it's killed.
 - The art is drawn in Python when it's first needed and sent to the terminal

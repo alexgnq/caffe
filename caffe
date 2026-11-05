@@ -10,6 +10,8 @@ finished ones, and naps when the bar is quiet.
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
 kitty, WezTerm or a recent iTerm2. Other terminals get the bar without pictures.
 Press q (or Ctrl-C) to close the bar and get your receipt.
+
+`caffe update` installs the latest version over this one.
 """
 
 import base64
@@ -1207,12 +1209,32 @@ def on_key(state, key):
     return key == "q"
 
 
+INSTALL_URL = "https://raw.githubusercontent.com/alexgnq/caffe/main/install.sh"
+
+
+def self_update():
+    """Run the install script over this copy, wherever it was installed.
+    Returns the exit code."""
+    try:
+        script = subprocess.run(
+            ["/usr/bin/curl", "-fsSL", INSTALL_URL], check=True, capture_output=True, timeout=30
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        print("caffe update: couldn't download the installer.", file=sys.stderr)
+        return 1
+    bin_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    env = {**os.environ, "CAFFE_BIN_DIR": bin_dir}
+    return subprocess.run(["/bin/sh"], input=script, env=env, check=False).returncode
+
+
 def check_args():
     if sys.argv[1:] in (["-h"], ["--help"]):
         print(__doc__.strip())
         sys.exit(0)
+    if sys.argv[1:] == ["update"]:
+        sys.exit(self_update())
     if sys.argv[1:]:
-        sys.exit("usage: caffe   (no arguments; press q to quit)")
+        sys.exit("usage: caffe [update]   (press q to quit)")
     if not sys.stdin.isatty():
         sys.exit("caffe needs an interactive terminal.")
 
