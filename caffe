@@ -682,6 +682,7 @@ class Cat:
     def pet(self, now):
         """Stop whatever it's doing and purr for a bit."""
         self.pets += 1
+        self.target = None  # it got distracted on its way to a cup
         self.mode, self.until, self.plan, self.petted_at = "purr", now + 3, [("sit", 1.5)], now
 
     def _arrive(self, now, calm, free_x, home):
@@ -905,15 +906,23 @@ def render_cups(state, now, pids, frame, room_rows):
         frame.out[-1] = f"  {DIM}+{hidden} more cups behind the counter{RESET}"
 
 
+def header(state, now, width):
+    """The title line, with the longest key hint that fits."""
+    awake = (
+        f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
+    )
+    for hint in (f"p to pet {state['cat'].name} · q to close", "p pet · q quit", ""):
+        line = f"{awake}{RESET}   {DIM}{hint}{RESET}" if hint else f"{awake}{RESET}"
+        if visible_len(line) + 1 <= width:  # +1: the cup emoji takes two cells
+            break
+    return line
+
+
 def render(state, now):
     """The text lines for this moment, and the pictures to show on top of them."""
     cols, term_rows = shutil.get_terminal_size((80, 24))
     frame = Frame(min(cols, 96), state["gfx"])
-    frame.out = [
-        f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
-        f"{RESET}   {DIM}p to pet {state['cat'].name} · q to close{RESET}",
-        DIM + "─" * frame.width + RESET,
-    ]
+    frame.out = [header(state, now, frame.width), DIM + "─" * frame.width + RESET]
     # Cups keep their place on the counter, oldest session first.
     started = {p: s for p, (_, _, s, _) in state["live"].items()}
     started.update((p, c[3]) for p, c in state["leaving"].items() if not gone(state, p, now))
@@ -1077,7 +1086,9 @@ def main():
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     gallery = Gallery()
-    sys.stdout.write("\033[?1049h\033[?25l")
+    # Alternate screen, no cursor, and no autowrap: a line too long for a narrow
+    # pane is cut off instead of spilling onto the next row.
+    sys.stdout.write("\033[?1049h\033[?25l\033[?7l")
     try:
         tty.setcbreak(fd)
         state["gfx"] = kitty_graphics(fd)
@@ -1102,7 +1113,7 @@ def main():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         if state["gfx"]:
             sys.stdout.write("\033_Ga=d,d=A,q=2\033\\")
-        sys.stdout.write("\033[?25h\033[?1049l")
+        sys.stdout.write("\033[?7h\033[?25h\033[?1049l")
         sys.stdout.flush()
         caf.terminate()
         receipt(state)
