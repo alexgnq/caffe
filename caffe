@@ -2,12 +2,14 @@
 """caffe: keep the Mac awake, with a coffee bar of your running agent sessions.
 
 Every interactive Copilot CLI / Codex CLI / Claude Code session is a cup on the
-counter. When a session ends, its cup is stamped on the loyalty card and added
-to that agent's stats on the menu board (`caffe stats` prints it).
+counter. Busy agents steam harder. When a session ends, its cup drains and
+leaves the counter. A barista cat wanders behind the cups, hops over to new
+and finished ones, and naps when the bar is quiet.
 Press q (or Ctrl-C) to close the bar and get your receipt.
 """
 
-import json
+import functools
+import math
 import os
 import random
 import select
@@ -19,16 +21,22 @@ import termios
 import time
 import tty
 
+
+def c256(n):
+    return f"\033[38;5;{n}m"
+
+
 AGENTS = {
-    "copilot": ("Copilot", "\033[38;5;141m"),
-    "codex": ("Codex", "\033[38;5;75m"),
-    "claude": ("Claude", "\033[38;5;209m"),
+    "copilot": ("Copilot", c256(141)),
+    "codex": ("Codex", c256(75)),
+    "claude": ("Claude", c256(209)),
 }
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
-BROWN, STEAM, GOLD = "\033[38;5;130m", "\033[38;5;250m", "\033[38;5;220m"
-STATS = os.environ.get("CAFFE_STATS") or os.path.expanduser("~/.local/state/caffe/stats.json")
-CARD = 10
-POLL_S, FRAME_S, POUR_S = 2.0, 0.25, 2.5
+GOLD, WOOD, COFFEE, CREMA, EMPTY = c256(220), c256(94), c256(94), c256(180), c256(240)
+STEAM_SHADES = (c256(239), c256(244), c256(250))  # top row fades out
+POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S, LEAVE_S = 3.0, 0.15, 0.5, 2.0, 3.0
+CUP_W, CELL = 9, 14
+BUSY_CPU, WORKING_CPU = 25.0, 3.0
 
 QUIPS = [
     "Brewing tokens, one sip at a time.",
@@ -46,13 +54,6 @@ IDLE_QUIPS = [
     "No orders. The barista polishes an empty cup.",
     "Quiet bar. Start an agent and I'll pour.",
     "Counter's clean. Mac's still awake, as you asked.",
-]
-
-STEAM_FRAMES = [
-    ("  ) (  ", " ( ) ) "),
-    (" ( (   ", "  ) ) )"),
-    ("   ) ) ", " ( ( ( "),
-    ("  ( (  ", " ) ) ) "),
 ]
 
 
@@ -74,10 +75,10 @@ def agent_kind(args):
 
 
 def scan_agents():
-    """Return {pid: (kind, tty, started_at)} for interactive agent sessions."""
+    """Return {pid: (kind, tty, started_at, cpu)} for interactive agent sessions."""
     try:
         out = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,ppid=,tty=,etime=,args="],
+            ["/bin/ps", "-axo", "pid=,ppid=,tty=,%cpu=,etime=,args="],
             check=False,
             capture_output=True,
             text=True,
@@ -87,14 +88,25 @@ def scan_agents():
         return None
     now, found = time.time(), {}
     for line in out.splitlines():
-        cols = line.split(None, 4)
-        if len(cols) < 5 or cols[2] == "??":
+        cols = line.split(None, 5)
+        if len(cols) < 6 or cols[2] == "??":
             continue
-        kind = agent_kind(cols[4])
+        kind = agent_kind(cols[5])
         if kind:
-            found[int(cols[0])] = (kind, int(cols[1]), cols[2], now - parse_etime(cols[3]))
-    # Drop helper processes whose parent is itself an agent session.
-    return {pid: (k, t, st) for pid, (k, ppid, t, st) in found.items() if ppid not in found}
+            try:
+                cpu = float(cols[3].replace(",", "."))
+            except ValueError:
+                cpu = 0.0
+            found[int(cols[0])] = [kind, int(cols[1]), cols[2], now - parse_etime(cols[4]), cpu]
+    # Fold helper processes whose parent is itself an agent session into that session.
+    for _kind, ppid, _tty, _started, cpu in list(found.values()):
+        if ppid in found:
+            found[ppid][4] += cpu
+    return {
+        pid: (kind, tty_name, started, cpu)
+        for pid, (kind, ppid, tty_name, started, cpu) in found.items()
+        if ppid not in found
+    }
 
 
 def fmt_dur(sec):
@@ -104,84 +116,40 @@ def fmt_dur(sec):
     return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
 
 
-AGENT_FIELDS = ("cups", "seconds", "longest")
+def steam_rows(t, phase, cpu):
+    """Three rows of drifting steam above a cup; busier agents get more wisps."""
+    wisps = 3 if cpu >= BUSY_CPU else (2 if cpu >= WORKING_CPU else 1)
+    columns = {1: (4,), 2: (3, 5), 3: (2, 4, 6)}[wisps]
+    grid = [[" "] * CUP_W for _ in range(3)]
+    for w, base in enumerate(columns):
+        for r in range(3):
+            # A calm cup only shows a thin wisp that flickers at the top.
+            if wisps == 1 and r == 0 and math.sin(t * 1.3 + phase) < 0.3:
+                continue
+            angle = t * 2.4 - r * 1.1 + w * 0.6 + phase
+            grid[r][base + round(math.sin(angle))] = "(" if math.cos(angle) > 0 else ")"
+    return [f"{STEAM_SHADES[r]}{''.join(row)}{RESET}" for r, row in enumerate(grid)]
 
 
-def _count(value):
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+def pour_rows(t):
+    """A coffee stream falling into the cup."""
+    return [f"{COFFEE}    {'┃' if (int(t * 10) + r) % 4 else '╏'}    {RESET}" for r in range(3)]
 
 
-def load_stats():
-    stats = {
-        "lifetime_cups": 0,
-        "free_coffees": 0,
-        "agents": {kind: dict.fromkeys(AGENT_FIELDS, 0) for kind in AGENTS},
-    }
-    try:
-        with open(STATS) as f:
-            loaded = json.load(f)
-    except (OSError, ValueError):
-        return stats
-    if not isinstance(loaded, dict):
-        return stats
-    stats["lifetime_cups"] = _count(loaded.get("lifetime_cups"))
-    stats["free_coffees"] = _count(loaded.get("free_coffees"))
-    agents = loaded.get("agents")
-    if isinstance(agents, dict):
-        for kind, saved in agents.items():
-            if kind in AGENTS and isinstance(saved, dict):
-                stats["agents"][kind] = {f: _count(saved.get(f)) for f in AGENT_FIELDS}
-    return stats
+def cup_rows(color, level, liquid=COFFEE, foam=CREMA):
+    """A mug filled `level` rows from the bottom (0 to 3, the top row is crema)."""
 
+    def inner(row):
+        if level < 3 - row:
+            return "     "
+        return f"{foam}≈≈≈≈≈{color}" if row == 0 else f"{liquid}▓▓▓▓▓{color}"
 
-def save_stats(stats):
-    os.makedirs(os.path.dirname(STATS), exist_ok=True)
-    tmp = f"{STATS}.{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(stats, f)
-    os.replace(tmp, STATS)
-
-
-def record_cup(stats, kind, seconds):
-    agent = stats["agents"][kind]
-    agent["cups"] += 1
-    agent["seconds"] += int(seconds)
-    agent["longest"] = max(agent["longest"], int(seconds))
-    stats["lifetime_cups"] += 1
-
-
-def share_bar(part, total, width=12):
-    filled = round(width * part / total) if total else 0
-    return "█" * filled + "░" * (width - filled)
-
-
-def menu_board(stats):
-    """Per-agent lifetime lines: cups, share bar, total brew time, longest session."""
-    agents = stats["agents"]
-    total = sum(a["cups"] for a in agents.values())
-    lines = []
-    for kind, (name, color) in AGENTS.items():
-        a = agents[kind]
-        cups = f"{a['cups']} cup" + ("" if a["cups"] == 1 else "s")
-        longest = f"longest {fmt_dur(a['longest'])}" if a["cups"] else ""
-        lines.append(
-            f"{color}{name:<8}{share_bar(a['cups'], total)}{RESET} {cups:<9}"
-            f"{DIM}{fmt_dur(a['seconds']) + ' brewed':<16}{longest}{RESET}"
-        )
-    return lines
-
-
-def cup_lines(kind, frame, fill):
-    color = AGENTS[kind][1]
-    s1, s2 = STEAM_FRAMES[frame % len(STEAM_FRAMES)]
-    liquid = "~~~~~" if fill >= 1 else ("_____" if fill >= 0.5 else "     ")
-    steam = (s1, s2) if fill >= 1 else ("       ", "       ")
     return [
-        f"{STEAM}{steam[0]} {RESET}",
-        f"{STEAM}{steam[1]} {RESET}",
-        f"{color}.-----. {RESET}",
-        f"{color}|{BROWN}{liquid}{color}|]{RESET}",
-        f"{color}`-----' {RESET}",
+        f"{color}┌─────┐  {RESET}",
+        f"{color}│{inner(0)}├╮ {RESET}",
+        f"{color}│{inner(1)}││ {RESET}",
+        f"{color}│{inner(2)}├╯ {RESET}",
+        f"{color}└─────┘  {RESET}",
     ]
 
 
@@ -201,95 +169,427 @@ def pad(s, width):
     return s + " " * max(0, width - visible_len(s))
 
 
-def render(state, frame):
-    cols, rows = shutil.get_terminal_size((80, 24))
-    now = time.time()
-    out = []
-    awake = fmt_dur(now - state["start"])
-    out.append(
-        f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{awake}{RESET}"
-        f"   {DIM}q to close the bar{RESET}"
-    )
-    out.append(DIM + "─" * min(cols, 72) + RESET)
-    out.append("")
+@functools.lru_cache(maxsize=512)
+def ansi_cells(s):
+    """Split an ANSI-colored string into ((sgr, char), ...) cells plus its solid span."""
+    cells, sgr, i = [], "", 0
+    while i < len(s):
+        if s[i] == "\033":
+            j = s.index("m", i) + 1
+            sgr = "" if s[i:j] == RESET else s[i:j]
+            i = j
+        else:
+            cells.append((sgr, s[i]))
+            i += 1
+    solid = [i for i, (_, ch) in enumerate(cells) if ch != " "]
+    return tuple(cells), (solid[0], solid[-1]) if solid else None
 
-    sessions = sorted(state["live"].items(), key=lambda kv: kv[1][2])
-    if not sessions:
-        out.append(f"   {DIM}.-----.{RESET}")
-        out.append(f"   {DIM}|     |]  {random.Random(int(now // 10)).choice(IDLE_QUIPS)}{RESET}")
-        out.append(f"   {DIM}`-----'{RESET}")
-        out.append("")
+
+class Canvas:
+    """A small character grid, so the cat can walk behind the cups."""
+
+    def __init__(self, width, height):
+        self.width, self.height = width, height
+        self.grid = [[None] * width for _ in range(height)]
+
+    def put(self, x, y, cells):
+        """Place pre-built (dx, (sgr, char)) cells in front of everything else."""
+        if 0 <= y < self.height:
+            row = self.grid[y]
+            for dx, cell in cells:
+                if 0 <= x + dx < self.width:
+                    row[x + dx] = cell
+
+    def draw(self, x, y, text, behind=False):
+        if not 0 <= y < len(self.grid):
+            return
+        cells, span = ansi_cells(text)
+        if span is None:
+            return
+        row = self.grid[y]
+        for i in range(span[0], span[1] + 1):
+            cx = x + i
+            if 0 <= cx < self.width and not (behind and row[cx] is not None):
+                row[cx] = cells[i]
+
+    def lines(self):
+        out = []
+        for row in self.grid:
+            parts, cur = [], ""
+            for cell in row:
+                sgr, ch = cell or ("", " ")
+                if sgr != cur:
+                    parts.append(RESET + sgr)
+                    cur = sgr
+                parts.append(ch)
+            out.append("".join(parts).rstrip() + RESET)
+        return out
+
+
+# Pixel-art cat, drawn with half-blocks: each terminal cell shows two stacked
+# pixels. Sprite keys: F fur, D markings, L light fur, W paws, E eye, C closed eye,
+# N nose, M open mouth, . transparent. The nose is the anchor, so poses line up.
+COATS = [
+    ("orange tabby", {"F": 208, "D": 166, "L": 223, "W": 223, "E": 70, "C": 166}),
+    ("black", {"F": 238, "D": 242, "L": 241, "W": 241, "E": 220, "C": 244}),
+    ("grey tabby", {"F": 246, "D": 241, "L": 252, "W": 252, "E": 214, "C": 241}),
+    ("calico", {"F": 255, "D": 237, "L": 255, "W": 255, "E": 70, "C": 237}),
+    ("siamese", {"F": 230, "D": 94, "L": 230, "W": 94, "E": 39, "C": 94}),
+    ("white", {"F": 255, "D": 248, "L": 255, "W": 254, "E": 39, "C": 245}),
+]
+CALICO_PATCHES = (255, 208, 237)
+NOSE, MOUTH = 211, 160
+CAT_NAMES = ["Mocha", "Miso", "Biscotti", "Pixel", "Bean", "Cortado", "Nibs", "Ristretto"]
+CAT_SPEED, CAT_MIN_X, CAT_RIGHT = 9.0, 11, 12  # cols/s, lane edges around the nose
+
+_WALK_TOP = (
+    ("..F......F...F", ".F.......FEFEF"),  # tail tip curled
+    (".F.......F...F", "F........FEFEF"),  # tail tip swayed
+)
+_WALK_BODY = (".FFDFFDFFFLNLF", ".FFFFFFFFFFFF.", "..FLLLLLLLF...")
+_WALK_LEGS = ("..W.W....W.W..", "...WW.....WW..", ".W...W..W...W.", "...WW.....WW..")
+_STRETCH = (
+    "F.............",
+    ".FF...........",
+    ".FFFF....F...F",
+    ".FDFFDFF.FEFEF",
+    "..F..FFFFFLNLF",
+    "..W....WWWW...",
+)
+_SIT = ("F...F...", "FEFEF...", "FLNLF...", ".FLF....", ".FLLF...", ".WFWFF..")
+_SIT_TAILS = (
+    ((6, 4), (7, 3), (7, 2), (6, 1)),
+    ((6, 4), (6, 3), (7, 2), (7, 1)),
+    ((6, 5), (7, 5), (7, 4)),
+)
+_NAP = ("FCFCFFFFFFF.", "FLNLFDFFDFFF", "WWFFFFFFFFFF")
+_NAP_BREATH = (".F.F........", ".F.F.FFFFF..")
+
+
+def _set(rows, x, y, ch):
+    rows[y] = rows[y][:x] + ch + rows[y][x + 1 :]
+
+
+def cat_walk(step):
+    tip, legs = _WALK_TOP[step // 4 % 2], _WALK_LEGS[step % 4]
+    return (*tip, *_WALK_BODY, legs)
+
+
+def cat_sit(eyes="E", tail=0, yawn=False, groom=0):
+    rows = list(_SIT)
+    rows[1] = rows[1].replace("E", eyes)
+    for x, y in _SIT_TAILS[tail]:
+        _set(rows, x, y, "F")
+    if yawn:
+        _set(rows, 2, 2, "M")
+        _set(rows, 2, 3, "M")
+    if groom:
+        _set(rows, 4, 1 + groom, "W")  # paw goes up to the face and back
+        _set(rows, 3, 5, "F")
+    return tuple(rows)
+
+
+def cat_nap(breath):
+    return (_NAP_BREATH[breath], *_NAP)
+
+
+@functools.lru_cache(maxsize=256)
+def sprite(rows, coat, flip):
+    """Turn a pixel sprite into half-block cells once per pose, coat and facing."""
+    if flip:
+        rows = tuple(r[::-1] for r in rows)
+    name, palette = COATS[coat]
+    if len(rows) % 2:
+        rows = ("." * len(rows[0]), *rows)
+
+    def color(x, y):
+        ch = rows[y][x]
+        if ch == ".":
+            return None
+        if ch == "F" and name == "calico":
+            return CALICO_PATCHES[(x + 2 * y) // 3 % 3]
+        return {"N": NOSE, "M": MOUTH}.get(ch) or palette[ch]
+
+    lines = []
+    for y in range(0, len(rows), 2):
+        line = []
+        for x in range(len(rows[0])):
+            top, bottom = color(x, y), color(x, y + 1)
+            if top is None and bottom is None:
+                continue
+            if top is None:
+                cell = (c256(bottom), "▄")
+            elif bottom is None:
+                cell = (c256(top), "▀")
+            elif top == bottom:
+                cell = (c256(top), "█")
+            else:
+                cell = (f"{c256(top)}\033[48;5;{bottom}m", "▀")
+            line.append((x, cell))
+        lines.append(tuple(line))
+    nose = next(r.index(c) for r in rows for c in "NM" if c in r)
+    return tuple(lines), nose
+
+
+class Cat:
+    """The barista cat. It walks along the counter in front of the cups, hops
+    over to new and finished cups, grooms, yawns, stretches, and naps when the
+    bar is quiet. `x` is the column of its nose."""
+
+    def __init__(self, now, home):
+        self.coat = random.randrange(len(COATS))
+        self.name = random.choice(CAT_NAMES)
+        self.x = self.goal = float(home)
+        self.dir, self.hop, self.hop_at, self.last = 1, False, -1.0, now
+        self.plan, self.mode, self.until = [], "nap", now + 4
+
+    @property
+    def title(self):
+        return f"{self.name} the {COATS[self.coat][0]} cat"
+
+    def go(self, x, hop=False):
+        self.goal, self.mode, self.hop, self.plan = float(x), "walk", hop, []
+
+    def moving(self, now):
+        return self.mode == "walk" or now - self.hop_at < 0.4
+
+    def _arrive(self, now, calm, free_x, home):
+        if self.hop:
+            self.hop, self.hop_at = False, now
+        u = random.uniform
+        if home is not None:
+            self.plan = [("nap", u(20, 40)), ("stretch", 1.5), ("groom", u(2, 4))]
+        elif calm and self.x >= free_x and random.random() < 0.5:
+            self.plan = [("nap", u(8, 16)), ("stretch", 1.5)]
+        else:
+            self.plan = random.choice(
+                [
+                    [("sit", u(2, 5))],
+                    [("groom", u(2, 3)), ("sit", u(1, 3))],
+                    [("sit", u(2, 4)), ("yawn", 1.2)],
+                ]
+            )
+        self._next(now)
+
+    def _next(self, now):
+        self.mode, dur = self.plan.pop(0)
+        self.until = now + dur
+
+    def step(self, now, lane_w, calm, free_x, home=None):
+        dt = min(0.5, now - self.last)
+        self.last = now
+        max_x = float(max(CAT_MIN_X, lane_w - CAT_RIGHT))
+        if home is not None and abs(self.goal - home) > 0.5:
+            self.go(home)
+        if self.mode == "walk":
+            goal = min(max(self.goal, CAT_MIN_X), max_x)
+            if abs(goal - self.x) <= CAT_SPEED * dt:
+                self.x = goal
+                self._arrive(now, calm, free_x, home)
+            else:
+                self.dir = 1 if goal > self.x else -1
+                self.x += self.dir * CAT_SPEED * dt
+        elif now >= self.until:
+            if self.plan:
+                self._next(now)
+            elif home is not None:
+                self._arrive(now, calm, free_x, home)
+            elif free_x <= max_x and random.random() < 0.6:
+                self.go(random.uniform(free_x, max_x))
+            else:
+                self.go(random.uniform(CAT_MIN_X, max_x))
+        self.x = min(max(self.x, CAT_MIN_X), max_x)
+
+    def pose(self, now):
+        """Pixel rows for the current moment, and whether the sprite faces right."""
+        if self.mode == "walk":
+            return cat_walk(int(self.x / 1.5)), self.dir == 1
+        if self.mode == "stretch":
+            return _STRETCH, self.dir == 1
+        if self.mode == "nap":
+            return cat_nap(int(now / 1.2) % 2), self.dir == -1
+        if self.mode == "groom":
+            return cat_sit("C", groom=1 + int(now * 3) % 2), self.dir == -1
+        if self.mode == "yawn":
+            return cat_sit("C", yawn=True), self.dir == -1
+        return cat_sit("C" if now % 5 < 0.3 else "E", tail=int(now * 1.5) % 3), self.dir == -1
+
+    def draw(self, canvas, now):
+        rows, faces_right = self.pose(now)
+        # Base sprites face right when walking and left otherwise.
+        flip = not faces_right if self.mode in ("walk", "stretch") else faces_right
+        lines, nose = sprite(rows, self.coat, flip)
+        left = round(self.x) - nose
+        top = canvas.height - len(lines)
+        if 0 <= now - self.hop_at < 0.35 and top > 0:
+            top -= 1
+        for i, line in enumerate(lines):
+            canvas.put(left, top + i, line)
+        if self.mode == "nap":
+            step = int(now * 1.5)
+            for i, ch in enumerate("zZ"):
+                k = (step + i) % 3
+                canvas.draw(round(self.x) + 1 + i, top - 1 - k, f"{STEAM_SHADES[2 - k]}{ch}", True)
+
+
+# name, cell width, art rows, visible cup width
+LAYOUTS = (("full", CELL, 8, 8), ("short", CELL, 6, 8), ("mini", 8, 4, 6))
+HOME_X = 13
+
+
+def mini_steam(t, phase, cpu):
+    row = [" "] * 6
+    columns = (1, 3) if cpu >= WORKING_CPU else (2,)
+    for w, base in enumerate(columns):
+        if len(columns) == 1 and math.sin(t * 1.3 + phase) < -0.2:
+            continue
+        angle = t * 2.4 + w * 0.6 + phase
+        row[base + round(math.sin(angle))] = "(" if math.cos(angle) > 0 else ")"
+    return f"{STEAM_SHADES[2]}{''.join(row)}{RESET}"
+
+
+def mini_cup(color, level, liquid=COFFEE):
+    inner = f"{liquid}▓▓▓{color}" if level else "   "
+    return [f"{color}┌───┐ {RESET}", f"{color}│{inner}├╯{RESET}", f"{color}└───┘ {RESET}"]
+
+
+def cup_cell(state, pid, now, layout):
+    """Art rows and two label lines for one cup on the counter."""
+    mini = layout == "mini"
+    if pid in state["leaving"]:
+        kind, tty_name, ended = state["leaving"][pid]
+        progress = min(1.0, (now - ended) / LEAVE_S)
+        if mini:
+            art = ["", *mini_cup(EMPTY, progress < 0.5, EMPTY)]
+        else:
+            art = [""] * 3 + cup_rows(EMPTY, round(3 * (1 - progress)), EMPTY, EMPTY)
+        status = f"{GOLD}✔ served{RESET}" if not mini else f"{GOLD}✔{RESET}"
     else:
-        cell = 14
-        per_row = max(1, (cols - 2) // cell)
-        for i in range(0, len(sessions), per_row):
-            chunk = sessions[i : i + per_row]
-            arts, labels, ages = [], [], []
-            for pid, (kind, tty_name, started) in chunk:
-                seen = state["first_seen"].get(pid, 0)
-                # Sessions already running at startup are served full; new ones pour in.
-                fill = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
-                arts.append(cup_lines(kind, frame + pid, fill))
-                name, color = AGENTS[kind]
-                labels.append(f"{color}{name}{RESET} {DIM}{tty_name.replace('ttys', 's')}{RESET}")
-                ages.append(
-                    f"{DIM}{fmt_dur(now - started)}{RESET}"
-                    if fill >= 1
-                    else f"{GOLD}pouring…{RESET}"
-                )
-            for line_i in range(5):
-                out.append("  " + "".join(pad(a[line_i], cell) for a in arts))
-            out.append("  " + "".join(pad(label, cell) for label in labels))
-            out.append("  " + "".join(pad(a, cell) for a in ages))
-            out.append("")
+        kind, tty_name, started, cpu = state["live"][pid]
+        color = AGENTS[kind][1]
+        seen = state["first_seen"].get(pid, 0)
+        # Sessions already running at startup are served full; new ones pour in.
+        fill = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
+        if fill < 1:
+            if mini:
+                art = [f"{COFFEE}  ┃{RESET}", *mini_cup(color, fill >= 0.5)]
+            else:
+                art = pour_rows(now) + cup_rows(color, int(fill * 4))
+            status = f"{GOLD}pouring…{RESET}"
+        else:
+            if mini:
+                art = [mini_steam(now, pid % 7, cpu), *mini_cup(color, 1)]
+            else:
+                art = steam_rows(now, pid % 7, cpu) + cup_rows(color, 3)
+            status = f"{DIM}{fmt_dur(now - started)}{RESET}"
+    if layout == "short":
+        art = art[2:]
+    name, color = AGENTS[kind]
+    label = f"{color}{name}{RESET}"
+    if not mini:
+        label += f" {DIM}{tty_name.replace('ttys', 's')}{RESET}"
+    return art, label, status
 
-    stamps = state["stats"]["lifetime_cups"] % CARD
-    card = "".join(f"{GOLD}●{RESET}" if i < stamps else f"{DIM}○{RESET}" for i in range(CARD))
-    out.append(
-        f"  Loyalty card {card}  {DIM}{stamps}/{CARD}, the next free coffee is on the house{RESET}"
-    )
-    stats = state["stats"]
-    out.append(
-        f"  {DIM}On the counter: {len(sessions)}  ·  served this shift: {state['served']}"
-        f"  ·  lifetime: {stats['lifetime_cups']}  ·  free coffees: {stats['free_coffees']}{RESET}"
-    )
-    out.append("")
-    out.append(f"  {BOLD}Menu board{RESET}")
-    out.extend("  " + line for line in menu_board(stats))
-    out.append("")
+
+def pick_layout(count, width, rows):
+    """The roomiest layout whose counters all fit on screen."""
+    for name, cell, art_h, cup_w in LAYOUTS:  # noqa: B007 (used after the loop)
+        per_row = max(1, (width - 2) // cell)
+        if -(-count // per_row) * (art_h + 4) <= rows:
+            break
+    return name, cell, art_h, cup_w, per_row
+
+
+def render(state, now):
+    """Return the full screen for this moment as a list of lines."""
+    cols, term_rows = shutil.get_terminal_size((80, 24))
+    width = min(cols, 96)
+    counter = f"{WOOD}{'▀' * width}{RESET}"
+    cat = state["cat"]
+    calm = all(cpu < WORKING_CPU for *_, cpu in state["live"].values())
+    out = [
+        f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
+        f"{RESET}   {DIM}q to close the bar{RESET}",
+        DIM + "─" * width + RESET,
+    ]
+
+    pids = sorted(state["live"], key=lambda p: state["live"][p][2])
+    pids += sorted(state["leaving"], key=lambda p: state["leaving"][p][2])
+    if not pids:
+        canvas = Canvas(width, 8)
+        for r, row in enumerate(cup_rows(EMPTY, 0)):
+            canvas.draw(2, 3 + r, row)
+        cat.step(now, width, calm=True, free_x=HOME_X, home=HOME_X)
+        cat.draw(canvas, now)
+        quip = random.Random(int(now // 10)).choice(IDLE_QUIPS)
+        out += [*canvas.lines(), counter, f"  {DIM}{quip}{RESET}", ""]
+    else:
+        layout, cell, art_h, cup_w, per_row = pick_layout(len(pids), width, term_rows - 5)
+        # Even mini cups can run out of room: show what fits and count the rest.
+        room = max(1, (term_rows - 5) // (art_h + 4)) * per_row
+        hidden = len(pids) - room if len(pids) > room else 0
+        pids = pids[:room]
+        groups = [pids[i : i + per_row] for i in range(0, len(pids), per_row)]
+        for gi, group in enumerate(groups):
+            cells = [cup_cell(state, pid, now, layout) for pid in group]
+            canvas = Canvas(width, art_h)
+            for ci, (art, _, _) in enumerate(cells):
+                for r, row in enumerate(art):
+                    canvas.draw(2 + ci * cell, r, row)
+            if gi == len(groups) - 1:
+                visit = state.pop("visit", None)
+                if visit in group:
+                    cat.go(2 + group.index(visit) * cell + cup_w + 2, hop=True)
+                cat.step(now, width, calm, free_x=2 + len(group) * cell + 2)
+                cat.draw(canvas, now)
+            out += canvas.lines()
+            out.append(counter)
+            out.append("  " + "".join(pad(label, cell) for _, label, _ in cells))
+            out.append("  " + "".join(pad(status, cell) for _, _, status in cells))
+            out.append("")
+        if hidden:
+            out[-1] = f"  {DIM}+{hidden} more cups behind the counter{RESET}"
+
     if state["toast"] and now < state["toast"][1]:
         out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
     else:
         out.append(f"  {DIM}“{QUIPS[int(now // 8) % len(QUIPS)]}”{RESET}")
+    return out
 
-    out = out[: rows - 1]
-    sys.stdout.write("\033[H" + "\n".join(line + "\033[K" for line in out) + "\033[J")
-    sys.stdout.flush()
+
+def frame_delay(state):
+    """Animate smoothly while something moves; tick slowly while everything naps."""
+    if state["live"] and any(cpu >= WORKING_CPU for *_, cpu in state["live"].values()):
+        return FRAME_S
+    if state["leaving"] or state["cat"].moving(time.time()):
+        return FRAME_S
+    if any(state["first_seen"].get(p, 0) > time.time() - POUR_S for p in state["live"]):
+        return FRAME_S
+    return IDLE_FRAME_S
 
 
 def update(state):
+    now = time.time()
+    for pid, (_, _, ended) in list(state["leaving"].items()):
+        if now - ended > LEAVE_S:
+            del state["leaving"][pid]
     live = scan_agents()
     if live is None:
         return
-    now = time.time()
     for pid in live.keys() - state["live"].keys():
         state["first_seen"][pid] = now
         if state["initialized"]:
+            state["visit"] = pid
             state["toast"] = (f"New order: {AGENTS[live[pid][0]][0]} on {live[pid][1]} ☕", now + 4)
     for pid in state["live"].keys() - live.keys():
-        kind, _, started = state["live"][pid]
+        kind, tty_name, started, _ = state["live"][pid]
         dur = now - started
+        state["leaving"][pid] = (kind, tty_name, now)
+        state["visit"] = pid
         state["served"] += 1
         state["longest"] = max(state["longest"], (dur, AGENTS[kind][0]))
-        state["shift"][kind] = state["shift"].get(kind, 0) + 1
-        record_cup(state["stats"], kind, dur)
-        if state["stats"]["lifetime_cups"] % CARD == 0:
-            state["stats"]["free_coffees"] += 1
-            state["toast"] = ("🎉 Card full! Free coffee earned. Go get a real one.", now + 8)
-        else:
-            state["toast"] = (f"Order up: {AGENTS[kind][0]} served after {fmt_dur(dur)} ✔", now + 5)
+        state["toast"] = (f"Order up: {AGENTS[kind][0]} served after {fmt_dur(dur)} ✔", now + 5)
         state["first_seen"].pop(pid, None)
-        save_stats(state["stats"])
     state["live"] = live
     state["initialized"] = True
 
@@ -301,12 +601,11 @@ def receipt(state):
     rows = [
         ("Mac kept awake", fmt_dur(now - state["start"])),
         ("Cups served", str(state["served"])),
+        ("Still brewing", str(len(state["live"]))),
+        ("Barista", state["cat"].name),
     ]
-    rows += [(f"  {AGENTS[k][0]}", str(n)) for k, n in sorted(state["shift"].items())]
-    rows.append(("Still brewing", str(len(state["live"]))))
     if state["longest"][0] > 0:
         rows.append(("Longest pour", f"{fmt_dur(state['longest'][0])} ({state['longest'][1]})"))
-    rows.append(("Lifetime cups", str(state["stats"]["lifetime_cups"])))
     print(f"\n  {line}\n  {'CAFFE RECEIPT':^{w}}\n  {line}")
     for k, v in rows:
         print(f"  {k:<{w - len(v) - 1}} {v}")
@@ -318,36 +617,25 @@ def start_caffeinate():
     return subprocess.Popen(["/usr/bin/caffeinate", "-dimsu", "-w", str(os.getpid())])
 
 
-def print_stats():
-    stats = load_stats()
-    print(f"\n  {BOLD}☕ caffe menu board{RESET}\n")
-    for line in menu_board(stats):
-        print("  " + line)
-    print(
-        f"\n  {DIM}Lifetime cups: {stats['lifetime_cups']}"
-        f"  ·  free coffees: {stats['free_coffees']}{RESET}\n"
-    )
-
-
 def main():
-    args = sys.argv[1:]
-    if args == ["stats"]:
-        print_stats()
+    if sys.argv[1:] in (["-h"], ["--help"]):
+        print(__doc__.strip())
         return
-    if args:
-        sys.exit("usage: caffe [stats]")
+    if sys.argv[1:]:
+        sys.exit("usage: caffe   (no arguments; press q to quit)")
     if not sys.stdin.isatty():
         sys.exit("caffe needs an interactive terminal.")
     caf = start_caffeinate()
+    cat = Cat(time.time(), HOME_X)
     state = {
         "start": time.time(),
         "live": {},
+        "leaving": {},
         "first_seen": {},
         "served": 0,
-        "shift": {},
         "longest": (0, ""),
-        "stats": load_stats(),
-        "toast": None,
+        "cat": cat,
+        "toast": (f"{cat.title} is on shift today.", time.time() + 6),
         "initialized": False,
     }
 
@@ -355,19 +643,36 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, on_term)
+    resized = [False]
+    signal.signal(signal.SIGWINCH, lambda *_: resized.__setitem__(0, True))
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     sys.stdout.write("\033[?1049h\033[?25l")
     try:
         tty.setcbreak(fd)
-        frame, last_poll = 0, 0.0
+        last_poll, shown = 0.0, []
         while True:
-            if time.time() - last_poll >= POLL_S:
+            now = time.time()
+            if now - last_poll >= POLL_S:
                 update(state)
-                last_poll = time.time()
-            render(state, frame)
-            frame += 1
-            r, _, _ = select.select([sys.stdin], [], [], FRAME_S)
+                last_poll = now
+            if resized[0]:
+                resized[0], shown = False, []
+                sys.stdout.write("\033[2J")
+            lines = render(state, now)[: shutil.get_terminal_size((80, 24)).lines - 1]
+            # Only rewrite lines that changed, so a quiet bar costs almost nothing.
+            out = [
+                f"\033[{y + 1};1H{line}\033[K"
+                for y, line in enumerate(lines)
+                if y >= len(shown) or shown[y] != line
+            ]
+            if len(lines) < len(shown):
+                out.append(f"\033[{len(lines) + 1};1H\033[J")
+            if out:
+                sys.stdout.write("".join(out))
+                sys.stdout.flush()
+            shown = lines
+            r, _, _ = select.select([sys.stdin], [], [], frame_delay(state))
             if r and sys.stdin.read(1).lower() == "q":
                 break
             if caf.poll() is not None:
