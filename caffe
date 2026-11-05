@@ -2,7 +2,8 @@
 """caffe: keep the Mac awake, with a coffee bar of your running agent sessions.
 
 Every interactive Copilot CLI / Codex CLI / Claude Code session is a cup on the
-counter. When a session ends, its cup is stamped on the loyalty card.
+counter. When a session ends, its cup is stamped on the loyalty card and added
+to that agent's stats on the menu board (`caffe stats` prints it).
 Press q (or Ctrl-C) to close the bar and get your receipt.
 """
 
@@ -103,25 +104,71 @@ def fmt_dur(sec):
     return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
 
 
+AGENT_FIELDS = ("cups", "seconds", "longest")
+
+
+def _count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
 def load_stats():
-    stats = {"lifetime_cups": 0, "free_coffees": 0}
+    stats = {
+        "lifetime_cups": 0,
+        "free_coffees": 0,
+        "agents": {kind: dict.fromkeys(AGENT_FIELDS, 0) for kind in AGENTS},
+    }
     try:
         with open(STATS) as f:
             loaded = json.load(f)
     except (OSError, ValueError):
         return stats
-    if isinstance(loaded, dict):
-        for key in stats:
-            value = loaded.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                stats[key] = value
+    if not isinstance(loaded, dict):
+        return stats
+    stats["lifetime_cups"] = _count(loaded.get("lifetime_cups"))
+    stats["free_coffees"] = _count(loaded.get("free_coffees"))
+    agents = loaded.get("agents")
+    if isinstance(agents, dict):
+        for kind, saved in agents.items():
+            if kind in AGENTS and isinstance(saved, dict):
+                stats["agents"][kind] = {f: _count(saved.get(f)) for f in AGENT_FIELDS}
     return stats
 
 
 def save_stats(stats):
     os.makedirs(os.path.dirname(STATS), exist_ok=True)
-    with open(STATS, "w") as f:
+    tmp = f"{STATS}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
         json.dump(stats, f)
+    os.replace(tmp, STATS)
+
+
+def record_cup(stats, kind, seconds):
+    agent = stats["agents"][kind]
+    agent["cups"] += 1
+    agent["seconds"] += int(seconds)
+    agent["longest"] = max(agent["longest"], int(seconds))
+    stats["lifetime_cups"] += 1
+
+
+def share_bar(part, total, width=12):
+    filled = round(width * part / total) if total else 0
+    return "█" * filled + "░" * (width - filled)
+
+
+def menu_board(stats):
+    """Per-agent lifetime lines: cups, share bar, total brew time, longest session."""
+    agents = stats["agents"]
+    total = sum(a["cups"] for a in agents.values())
+    lines = []
+    for kind, (name, color) in AGENTS.items():
+        a = agents[kind]
+        cups = f"{a['cups']} cup" + ("" if a["cups"] == 1 else "s")
+        longest = f"longest {fmt_dur(a['longest'])}" if a["cups"] else ""
+        lines.append(
+            f"{color}{name:<8}{share_bar(a['cups'], total)}{RESET} {cups:<9}"
+            f"{DIM}{fmt_dur(a['seconds']) + ' brewed':<16}{longest}{RESET}"
+        )
+    return lines
 
 
 def cup_lines(kind, frame, fill):
@@ -207,6 +254,9 @@ def render(state, frame):
         f"  ·  lifetime: {stats['lifetime_cups']}  ·  free coffees: {stats['free_coffees']}{RESET}"
     )
     out.append("")
+    out.append(f"  {BOLD}Menu board{RESET}")
+    out.extend("  " + line for line in menu_board(stats))
+    out.append("")
     if state["toast"] and now < state["toast"][1]:
         out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
     else:
@@ -231,7 +281,8 @@ def update(state):
         dur = now - started
         state["served"] += 1
         state["longest"] = max(state["longest"], (dur, AGENTS[kind][0]))
-        state["stats"]["lifetime_cups"] += 1
+        state["shift"][kind] = state["shift"].get(kind, 0) + 1
+        record_cup(state["stats"], kind, dur)
         if state["stats"]["lifetime_cups"] % CARD == 0:
             state["stats"]["free_coffees"] += 1
             state["toast"] = ("🎉 Card full! Free coffee earned. Go get a real one.", now + 8)
@@ -250,8 +301,9 @@ def receipt(state):
     rows = [
         ("Mac kept awake", fmt_dur(now - state["start"])),
         ("Cups served", str(state["served"])),
-        ("Still brewing", str(len(state["live"]))),
     ]
+    rows += [(f"  {AGENTS[k][0]}", str(n)) for k, n in sorted(state["shift"].items())]
+    rows.append(("Still brewing", str(len(state["live"]))))
     if state["longest"][0] > 0:
         rows.append(("Longest pour", f"{fmt_dur(state['longest'][0])} ({state['longest'][1]})"))
     rows.append(("Lifetime cups", str(state["stats"]["lifetime_cups"])))
@@ -266,7 +318,24 @@ def start_caffeinate():
     return subprocess.Popen(["/usr/bin/caffeinate", "-dimsu", "-w", str(os.getpid())])
 
 
+def print_stats():
+    stats = load_stats()
+    print(f"\n  {BOLD}☕ caffe menu board{RESET}\n")
+    for line in menu_board(stats):
+        print("  " + line)
+    print(
+        f"\n  {DIM}Lifetime cups: {stats['lifetime_cups']}"
+        f"  ·  free coffees: {stats['free_coffees']}{RESET}\n"
+    )
+
+
 def main():
+    args = sys.argv[1:]
+    if args == ["stats"]:
+        print_stats()
+        return
+    if args:
+        sys.exit("usage: caffe [stats]")
     if not sys.stdin.isatty():
         sys.exit("caffe needs an interactive terminal.")
     caf = start_caffeinate()
@@ -275,6 +344,7 @@ def main():
         "live": {},
         "first_seen": {},
         "served": 0,
+        "shift": {},
         "longest": (0, ""),
         "stats": load_stats(),
         "toast": None,

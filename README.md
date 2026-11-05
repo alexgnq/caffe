@@ -10,7 +10,9 @@ cup for every AI coding agent you have running.
   running in a terminal show up on the counter. New ones pour in.
 - **Loyalty card.** Every finished session earns a stamp. Ten stamps and you've
   earned a free (real) coffee.
-- **Receipt on quit:** time awake, cups served, longest session.
+- **Menu board.** Lifetime stats per agent: cups served, share of all cups,
+  total brew time and longest session.
+- **Receipt on quit:** time awake, cups served per agent, longest session.
 
 ## Install
 
@@ -29,6 +31,12 @@ caffe
 ```
 
 Press `q` or `Ctrl-C` to close the bar.
+
+```sh
+caffe stats
+```
+
+Prints the lifetime menu board without keeping the Mac awake.
 
 ## How it works
 
