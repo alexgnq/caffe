@@ -36,6 +36,8 @@ jobs:
           persist-credentials: false
       - name: Compile with system python3
         run: /usr/bin/python3 -m py_compile caffe
+      - name: Regression tests
+        run: /usr/bin/python3 -m unittest discover -s tests
       - name: Install script
         run: |
           sed "s#https://raw.githubusercontent.com/alexgnq/caffe/\${CAFFE_REF:-main}#file://$PWD#" install.sh \

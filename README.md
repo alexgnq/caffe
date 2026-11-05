@@ -6,20 +6,25 @@ cup for every AI coding agent you have running.
 ![caffe in action](caffe.gif)
 
 - **Keeps the Mac awake** until you quit (`caffeinate -dimsu` under the hood).
-- **One cup per agent session.** Copilot CLI, Codex CLI, Claude Code and Pi
-  sessions running in a terminal show up on the counter, each in its own
+- **Espressos for CLI sessions.** Copilot CLI, Codex CLI, Claude Code and Pi
+  sessions running in a terminal get small cups and saucers, each in its own
   colour. New ones pour in, and finished ones drain and turn grey.
+- **Lattes for applications.** Codex, Copilot, Claude and VS Code each get a
+  latte named and coloured for the application. Helpers and agent backends
+  belong to that app's drink. These cups track open applications, rather than
+  individual chats, and stay on the bar while the app is open.
 - **Steam follows the work.** The more CPU an agent uses, the more its cup
   steams.
 - **A barista cat.** A random name and coat each launch. It walks behind the
   cups, checks on new ones, grooms, yawns and naps when things are quiet. It
-  likes to knock finished cups off the bar.
+  knocks every finished cup off the bar.
 - **Pet the cat** with `p`. It purrs.
 - **Rush hour.** With four or more agents working at once, the cat hurries.
 - **Lots of agents?** Cups shrink to fit the screen. Anything that still
   doesn't fit is counted below the counter.
-- **Receipt on quit:** time awake, cups served, cups still brewing, the
-  barista's name, times petted and the longest session.
+- **Receipt on quit:** an order number, your espressos per agent, the cups the
+  cat broke, time awake against total agent time, the longest session, and the
+  cat's tip in pets. Open apps don't count.
 
 ## Install
 
