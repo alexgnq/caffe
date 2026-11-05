@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """caffe: keep the Mac awake, with a coffee bar of your running agent sessions.
 
-Every interactive Copilot CLI / Codex CLI / Claude Code session is a cup on the
-counter. Busy agents steam harder. When a session ends, its cup drains and
-leaves the counter. A barista cat wanders behind the cups, hops over to new
-and finished ones, and naps when the bar is quiet.
+Every interactive Copilot CLI / Codex CLI / Claude Code / Pi session is a cup on
+the counter. Busy agents steam harder. When a session ends, its cup drains and
+leaves the counter. A barista cat wanders behind the cups, checks on new and
+finished ones, and naps when the bar is quiet.
+
+The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
+kitty, WezTerm or a recent iTerm2. Other terminals get the bar without pictures.
 Press q (or Ctrl-C) to close the bar and get your receipt.
 """
 
-import functools
+import base64
 import math
 import os
 import random
+import re
 import select
 import shutil
 import signal
@@ -20,23 +24,27 @@ import sys
 import termios
 import time
 import tty
+import zlib
 
 
 def c256(n):
     return f"\033[38;5;{n}m"
 
 
+# kind: (name, label color, mug glaze)
 AGENTS = {
-    "copilot": ("Copilot", c256(141)),
-    "codex": ("Codex", c256(75)),
-    "claude": ("Claude", c256(209)),
+    "copilot": ("Copilot", c256(141), (167, 139, 250)),
+    "codex": ("Codex", c256(75), (86, 160, 245)),
+    "claude": ("Claude", c256(209), (222, 125, 90)),
+    "pi": ("Pi", c256(114), (110, 196, 120)),
 }
+SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
-GOLD, WOOD, COFFEE, CREMA, EMPTY = c256(220), c256(94), c256(94), c256(180), c256(240)
-STEAM_SHADES = (c256(239), c256(244), c256(250))  # top row fades out
-POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S, LEAVE_S = 3.0, 0.15, 0.5, 2.0, 3.0
-CUP_W, CELL = 9, 14
+GOLD, WOOD = c256(220), c256(94)
+POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S = 3.0, 0.12, 0.5, 2.0
+DRAIN_S, SERVED_S = 3.0, 15.0  # a finished cup drains, and leaves if the cat doesn't come
 BUSY_CPU, WORKING_CPU = 25.0, 3.0
+RUSH_AT = 4  # agents working at once
 
 QUIPS = [
     "Brewing tokens, one sip at a time.",
@@ -116,251 +124,572 @@ def fmt_dur(sec):
     return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
 
 
-def steam_rows(t, phase, cpu):
-    """Three rows of drifting steam above a cup; busier agents get more wisps."""
-    wisps = 3 if cpu >= BUSY_CPU else (2 if cpu >= WORKING_CPU else 1)
-    columns = {1: (4,), 2: (3, 5), 3: (2, 4, 6)}[wisps]
-    grid = [[" "] * CUP_W for _ in range(3)]
-    for w, base in enumerate(columns):
-        for r in range(3):
-            # A calm cup only shows a thin wisp that flickers at the top.
-            if wisps == 1 and r == 0 and math.sin(t * 1.3 + phase) < 0.3:
-                continue
-            angle = t * 2.4 - r * 1.1 + w * 0.6 + phase
-            grid[r][base + round(math.sin(angle))] = "(" if math.cos(angle) > 0 else ")"
-    return [f"{STEAM_SHADES[r]}{''.join(row)}{RESET}" for r, row in enumerate(grid)]
-
-
-def pour_rows(t):
-    """A coffee stream falling into the cup."""
-    return [f"{COFFEE}    {'┃' if (int(t * 10) + r) % 4 else '╏'}    {RESET}" for r in range(3)]
-
-
-def cup_rows(color, level, liquid=COFFEE, foam=CREMA):
-    """A mug filled `level` rows from the bottom (0 to 3, the top row is crema)."""
-
-    def inner(row):
-        if level < 3 - row:
-            return "     "
-        return f"{foam}≈≈≈≈≈{color}" if row == 0 else f"{liquid}▓▓▓▓▓{color}"
-
-    return [
-        f"{color}┌─────┐  {RESET}",
-        f"{color}│{inner(0)}├╮ {RESET}",
-        f"{color}│{inner(1)}││ {RESET}",
-        f"{color}│{inner(2)}├╯ {RESET}",
-        f"{color}└─────┘  {RESET}",
-    ]
-
-
 def visible_len(s):
-    out, esc = 0, False
-    for ch in s:
-        if ch == "\033":
-            esc = True
-        elif esc and ch == "m":
-            esc = False
-        elif not esc:
-            out += 1
-    return out
+    return len(re.sub(r"\033\[[\d;]*m", "", s))
 
 
 def pad(s, width):
     return s + " " * max(0, width - visible_len(s))
 
 
-@functools.lru_cache(maxsize=512)
-def ansi_cells(s):
-    """Split an ANSI-colored string into ((sgr, char), ...) cells plus its solid span."""
-    cells, sgr, i = [], "", 0
-    while i < len(s):
-        if s[i] == "\033":
-            j = s.index("m", i) + 1
-            sgr = "" if s[i:j] == RESET else s[i:j]
-            i = j
-        else:
-            cells.append((sgr, s[i]))
-            i += 1
-    solid = [i for i, (_, ch) in enumerate(cells) if ch != " "]
-    return tuple(cells), (solid[0], solid[-1]) if solid else None
+# ---- Drawing. Each sprite is drawn once from anti-aliased shapes and sent to
+# the terminal as an image. Shapes are measured in units where a cell is 8 wide
+# and 16 tall. Images get 2 pixels per unit, so they stay sharp on Retina.
+CW, CH, PX = 8, 16, 2
+INK, WHITE, PINK = (28, 26, 30), (255, 255, 255), (236, 150, 165)
 
 
-class Canvas:
-    """A small character grid, so the cat can walk behind the cups."""
-
-    def __init__(self, width, height):
-        self.width, self.height = width, height
-        self.grid = [[None] * width for _ in range(height)]
-
-    def put(self, x, y, cells):
-        """Place pre-built (dx, (sgr, char)) cells in front of everything else."""
-        if 0 <= y < self.height:
-            row = self.grid[y]
-            for dx, cell in cells:
-                if 0 <= x + dx < self.width:
-                    row[x + dx] = cell
-
-    def draw(self, x, y, text, behind=False):
-        if not 0 <= y < len(self.grid):
-            return
-        cells, span = ansi_cells(text)
-        if span is None:
-            return
-        row = self.grid[y]
-        for i in range(span[0], span[1] + 1):
-            cx = x + i
-            if 0 <= cx < self.width and not (behind and row[cx] is not None):
-                row[cx] = cells[i]
-
-    def lines(self):
-        out = []
-        for row in self.grid:
-            parts, cur = [], ""
-            for cell in row:
-                sgr, ch = cell or ("", " ")
-                if sgr != cur:
-                    parts.append(RESET + sgr)
-                    cur = sgr
-                parts.append(ch)
-            out.append("".join(parts).rstrip() + RESET)
-        return out
+def mix(a, b, t):
+    t = min(1.0, max(0.0, t))
+    return tuple(round(x + (y - x) * t) for x, y in zip(a, b))
 
 
-# Pixel-art cat, drawn with half-blocks: each terminal cell shows two stacked
-# pixels. Sprite keys: F fur, D markings, L light fur, W paws, E eye, C closed eye,
-# N nose, M open mouth, . transparent. The nose is the anchor, so poses line up.
+# A shape is (distance, box): distance(x, y) is negative inside the shape and
+# box = (x0, y0, x1, y1) bounds it.
+def circle(cx, cy, r):
+    return (lambda x, y: math.hypot(x - cx, y - cy) - r), (cx - r, cy - r, cx + r, cy + r)
+
+
+def ellipse(cx, cy, rx, ry):
+    m = min(rx, ry)
+    return (
+        (lambda x, y: (math.hypot((x - cx) / rx, (y - cy) / ry) - 1) * m),
+        (cx - rx, cy - ry, cx + rx, cy + ry),
+    )
+
+
+def capsule(ax, ay, bx, by, r):
+    dx, dy = bx - ax, by - ay
+    length2 = dx * dx + dy * dy or 1e-9
+
+    def dist(x, y):
+        t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / length2))
+        return math.hypot(x - ax - t * dx, y - ay - t * dy) - r
+
+    return dist, (min(ax, bx) - r, min(ay, by) - r, max(ax, bx) + r, max(ay, by) + r)
+
+
+def rbox(x0, y0, x1, y1, r):
+    cx, cy, hx, hy = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2 - r, (y1 - y0) / 2 - r
+
+    def dist(x, y):
+        qx, qy = abs(x - cx) - hx, abs(y - cy) - hy
+        return math.hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - r
+
+    return dist, (x0, y0, x1, y1)
+
+
+def poly(*pts):
+    """A convex polygon."""
+    cx, cy = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+    edges = []
+    for (ax, ay), (bx, by) in zip(pts, pts[1:] + pts[:1]):
+        nx, ny = by - ay, ax - bx
+        n = math.hypot(nx, ny)
+        nx, ny = nx / n, ny / n
+        if (cx - ax) * nx + (cy - ay) * ny > 0:
+            nx, ny = -nx, -ny
+        edges.append((ax, ay, nx, ny))
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return (
+        (lambda x, y: max((x - ax) * nx + (y - ay) * ny for ax, ay, nx, ny in edges)),
+        (min(xs), min(ys), max(xs), max(ys)),
+    )
+
+
+def union(*shapes):
+    fns = [f for f, _ in shapes]
+    boxes = [b for _, b in shapes]
+    box = tuple(f(b[i] for b in boxes) for i, f in enumerate((min, min, max, max)))
+    return (lambda x, y: min(f(x, y) for f in fns)), box
+
+
+def clip(shape, mask):
+    (f, box), (g, _) = shape, mask
+    return (lambda x, y: max(f(x, y), g(x, y))), box
+
+
+def grow(shape, d):
+    f, (x0, y0, x1, y1) = shape
+    return (lambda x, y: f(x, y) - d), (x0 - d, y0 - d, x1 + d, y1 + d)
+
+
+def path(points, r):
+    return union(*(capsule(*a, *b, r) for a, b in zip(points, points[1:])))
+
+
+class Img:
+    """An RGBA sprite `cols` x `rows` cells big, with its shapes zoomed by `k`."""
+
+    def __init__(self, cols, rows, k=1.0):
+        self.cols, self.rows, self.k = cols, rows, k
+        self.w, self.h = cols * CW * PX, rows * CH * PX
+        self.buf = bytearray(self.w * self.h * 4)
+        self.moved = None
+
+    def move(self, angle, pivot, shift):
+        """Draw what follows turned by `angle` around `pivot`, then shifted."""
+        ca, sa, (px, py), (dx, dy) = math.cos(angle), math.sin(angle), pivot, shift
+
+        def back(x, y):  # from the image to where the shape was drawn
+            x, y = x - dx - px, y - dy - py
+            return ca * x + sa * y + px, -sa * x + ca * y + py
+
+        def there(x, y):
+            x, y = x - px, y - py
+            return ca * x - sa * y + px + dx, sa * x + ca * y + py + dy
+
+        self.moved = back, there
+
+    def fill(self, shape, color, alpha=1.0):
+        """Paint a shape. `color` and `alpha` may also be functions of (x, y)."""
+        if self.moved:
+            shape, color, alpha = self._moved(shape, color, alpha)
+        dist, (x0, y0, x1, y1) = shape
+        s, buf, w = PX * self.k, self.buf, self.w
+        for py in range(max(0, int(y0 * s) - 1), min(self.h, math.ceil(y1 * s) + 1)):
+            y = (py + 0.5) / s
+            for px in range(max(0, int(x0 * s) - 1), min(w, math.ceil(x1 * s) + 1)):
+                x = (px + 0.5) / s
+                a = min(1.0, 0.5 - dist(x, y) * s)
+                if a <= 0:
+                    continue
+                a *= alpha(x, y) if callable(alpha) else alpha
+                if a <= 0.004:  # (also keeps a fully faded shape off empty pixels)
+                    continue
+                rgb = color(x, y) if callable(color) else color
+                i = (py * w + px) * 4
+                under = buf[i + 3] / 255 * (1 - a)
+                total = a + under
+                buf[i] = round((rgb[0] * a + buf[i] * under) / total)
+                buf[i + 1] = round((rgb[1] * a + buf[i + 1] * under) / total)
+                buf[i + 2] = round((rgb[2] * a + buf[i + 2] * under) / total)
+                buf[i + 3] = round(total * 255)
+
+    def _moved(self, shape, color, alpha):
+        back, there = self.moved
+        (dist, (x0, y0, x1, y1)) = shape
+        corners = [there(x, y) for x in (x0, x1) for y in (y0, y1)]
+        xs, ys = [c[0] for c in corners], [c[1] for c in corners]
+
+        def undo(f):
+            return (lambda x, y: f(*back(x, y))) if callable(f) else f
+
+        return (undo(dist), (min(xs), min(ys), max(xs), max(ys))), undo(color), undo(alpha)
+
+    def mirror(self):
+        row = self.w * 4
+        for y in range(self.h):
+            line = self.buf[y * row : (y + 1) * row]
+            px = [line[i : i + 4] for i in range(0, row, 4)]
+            self.buf[y * row : (y + 1) * row] = b"".join(reversed(px))
+        return self
+
+
+def mug_sprite(glaze, fill, k):
+    """A mug in an agent's glaze. fill: 0 empty, 1 coffee, 2 topped with crema."""
+    img = Img(math.ceil(6 * k), math.ceil(3 * k), k)
+    img.fill(ellipse(21, 46.6, 17, 1.6), INK, 0.35)  # shadow on the counter
+    draw_mug(img, glaze, fill)
+    return img
+
+
+KNOCK_FRAMES, KNOCK_S = 12, 1.0
+
+
+def knock_sprite(glaze, frame, k):
+    """A mug the cat swatted: it tips over and drops behind the bar. The picture
+    is bigger than a mug (4 cols to the left, 1 row up) and ends at the counter,
+    so the falling mug disappears behind it."""
+    img = Img(math.ceil(10 * k), math.ceil(4 * k), k)
+    t = frame / KNOCK_FRAMES
+    angle = -min(1.0, t / 0.25) * 0.45 - max(0.0, t - 0.25) * 1.2
+    left, up = round(4 * k) * CW / k - 12 * t, (img.rows - math.ceil(3 * k)) * CH / k
+    img.move(angle, (6, 46.5), (left, up + max(0.0, t - 0.25) ** 2 * 200))
+    draw_mug(img, glaze, 0)
+    return img
+
+
+def draw_mug(img, glaze, fill):
+    shade, light = mix(glaze, INK, 0.35), mix(glaze, WHITE, 0.4)
+
+    def glazed(x, _y):
+        t = (x - 6) / 30
+        return mix(light, glaze, t * 4) if t < 0.25 else mix(glaze, shade, (t - 0.45) * 2)
+
+    handle = (
+        (lambda x, y: max(abs(math.hypot(x - 34, y - 28.5) - 6.6) - 2.3, 34 - x)),
+        (
+            34,
+            19,
+            43,
+            38,
+        ),
+    )
+    img.fill(handle, shade)
+    img.fill(union(rbox(6, 13, 36, 46.5, 5), rbox(6, 13, 36, 30, 0)), glazed)
+    img.fill(ellipse(21, 13, 15, 4), light)  # rim
+    inside = ellipse(21, 13.4, 12.8, 2.9)
+    if fill == 0:
+        img.fill(inside, mix(glaze, INK, 0.7))
+    else:
+        img.fill(inside, (88, 54, 34))
+    if fill == 2:
+        img.fill(ellipse(21, 13.7, 10.6, 2.1), (196, 148, 100))
+        img.fill(ellipse(20, 13.6, 4.8, 1.1), (234, 204, 166))  # a little latte art
+
+
+STEAM_FRAMES = 12
+
+
+def steam_sprite(level, frame, rows):
+    """Wisps rising from a cup: one for a calm agent, three for a busy one."""
+    img = Img(6, rows)
+    rim = (rows - 1) * CH + 13  # the rim of the mug below, which overlaps the last row
+    phase = frame / STEAM_FRAMES * 2 * math.pi
+    length = (rim - 2) * (0.5, 0.8, 1.0)[level]
+    for j, base in enumerate(((21,), (17.5, 24.5), (15, 21, 27))[level]):
+
+        def dist(x, y, base=base, off=j * 2.1):
+            if not rim - length < y < rim - 1:
+                return 9.0
+            h = rim - y
+            centre = base + math.sin(h * 0.16 - phase + off) * (0.6 + h * 0.06)
+            return abs(x - centre) - (1.1 + h * 0.03)
+
+        def alpha(_x, y, off=j * 2.1):
+            h = (rim - y) / length
+            fade = min(1.0, h * 5) * max(0.0, 1 - h) ** 0.8
+            return 0.55 * fade * (0.7 + 0.3 * math.sin((rim - y) * 0.3 - 2 * phase + off))
+
+        img.fill((dist, (base - 9, rim - length - 1, base + 9, rim)), (240, 238, 242), alpha)
+    return img
+
+
+def pour_sprite(frame, rows):
+    """Coffee pouring into the mug below."""
+    img = Img(6, rows)
+    rim = (rows - 1) * CH + 13
+
+    def stream(width, shift=0.0):
+        def dist(x, y):
+            return abs(x - 21 - shift - 0.5 * math.sin(y * 0.5 + frame * 1.6)) - width
+
+        return clip((dist, (17, 0, 25, rim)), rbox(0, 0, 48, rim, 0))
+
+    img.fill(stream(1.4), (104, 62, 38))
+    img.fill(stream(0.4, -0.5), (170, 116, 76))
+    img.fill(ellipse(21, rim + 0.4, 3.4 + frame % 2, 1.1), (126, 80, 50))
+    return img
+
+
+def counter_sprite(cols):
+    """The wooden bar top."""
+    img = Img(cols, 1)
+
+    def wood(x, y):
+        grain = math.sin(x * 0.11 + 2.5 * math.sin(x * 0.013 + y * 0.35))
+        return mix(
+            mix((164, 110, 66), (108, 68, 40), (y - 3) / 13), (86, 52, 30), 0.1 + 0.1 * grain
+        )
+
+    img.fill(rbox(0, 3, cols * CW, 16, 0), wood)
+    img.fill(rbox(0, 1, cols * CW, 4.5, 1.2), (204, 158, 110))  # the lit top edge
+    return img
+
+
+# ---- The barista cat, drawn from simple shapes. Poses face right (walk, nap)
+# or the viewer (sit, groom, yawn). Each coat: name, fur, markings, light fur,
+# eyes, pattern.
 COATS = [
-    ("orange tabby", {"F": 208, "D": 166, "L": 223, "W": 223, "E": 70, "C": 166}),
-    ("black", {"F": 238, "D": 242, "L": 241, "W": 241, "E": 220, "C": 244}),
-    ("grey tabby", {"F": 246, "D": 241, "L": 252, "W": 252, "E": 214, "C": 241}),
-    ("calico", {"F": 255, "D": 237, "L": 255, "W": 255, "E": 70, "C": 237}),
-    ("siamese", {"F": 230, "D": 94, "L": 230, "W": 94, "E": 39, "C": 94}),
-    ("white", {"F": 255, "D": 248, "L": 255, "W": 254, "E": 39, "C": 245}),
+    ("orange tabby", (238, 148, 66), (196, 104, 42), (252, 228, 194), (132, 190, 72), "tabby"),
+    ("tuxedo", (54, 54, 62), (54, 54, 62), (240, 240, 236), (232, 200, 70), None),
+    ("grey tabby", (160, 160, 170), (112, 112, 124), (224, 224, 230), (226, 172, 62), "tabby"),
+    ("calico", (246, 242, 232), (64, 56, 52), (250, 248, 242), (132, 190, 72), "calico"),
+    ("siamese", (240, 228, 206), (100, 76, 62), (248, 240, 226), (92, 160, 232), "points"),
+    ("white", (246, 246, 248), (216, 216, 224), (255, 255, 255), (92, 160, 232), None),
 ]
-CALICO_PATCHES = (255, 208, 237)
-NOSE, MOUTH = 211, 160
 CAT_NAMES = ["Mocha", "Miso", "Biscotti", "Pixel", "Bean", "Cortado", "Nibs", "Ristretto"]
-CAT_SPEED, CAT_MIN_X, CAT_RIGHT = 9.0, 11, 12  # cols/s, lane edges around the nose
-
-_WALK_TOP = (
-    ("..F......F...F", ".F.......FEFEF"),  # tail tip curled
-    (".F.......F...F", "F........FEFEF"),  # tail tip swayed
-)
-_WALK_BODY = (".FFDFFDFFFLNLF", ".FFFFFFFFFFFF.", "..FLLLLLLLF...")
-_WALK_LEGS = ("..W.W....W.W..", "...WW.....WW..", ".W...W..W...W.", "...WW.....WW..")
-_STRETCH = (
-    "F.............",
-    ".FF...........",
-    ".FFFF....F...F",
-    ".FDFFDFF.FEFEF",
-    "..F..FFFFFLNLF",
-    "..W....WWWW...",
-)
-_SIT = ("F...F...", "FEFEF...", "FLNLF...", ".FLF....", ".FLLF...", ".WFWFF..")
-_SIT_TAILS = (
-    ((6, 4), (7, 3), (7, 2), (6, 1)),
-    ((6, 4), (6, 3), (7, 2), (7, 1)),
-    ((6, 5), (7, 5), (7, 4)),
-)
-_NAP = ("FCFCFFFFFFF.", "FLNLFDFFDFFF", "WWFFFFFFFFFF")
-_NAP_BREATH = (".F.F........", ".F.F.FFFFF..")
 
 
-def _set(rows, x, y, ch):
-    rows[y] = rows[y][:x] + ch + rows[y][x + 1 :]
+def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=False):  # noqa: PLR0913
+    cx, sway = 28, (0, 2, -1)[tail]
+    eyes = [(cx - 4.3, 21.2), (cx + 4.3, 21.2)]
+    pose = {
+        "tail": path(((35, 46), (42, 44.5), (45.5, 38.5), (44 + sway, 31 + sway / 2)), 2.6),
+        "body": ellipse(cx, 37, 10.5, 11),
+        "head": ellipse(cx, 21.5, 10, 8.5),
+        "ears": [
+            poly((cx - 9.6, 19), (cx - 8, 8.5), (cx - 2.4, 14.6)),
+            poly((cx + 2.4, 14.6), (cx + 8, 8.5), (cx + 9.6, 19)),
+        ],
+        "inner": [
+            poly((cx - 8, 16.5), (cx - 7.4, 11.6), (cx - 4.4, 15)),
+            poly((cx + 4.4, 15), (cx + 7.4, 11.6), (cx + 8, 16.5)),
+        ],
+        "light": [
+            ellipse(cx, 38.5, 5.6, 8),
+            ellipse(cx - 2, 26, 2.9, 2.2),
+            ellipse(cx + 2, 26, 2.9, 2.2),
+        ],
+        "paws": [ellipse(cx - 4, 46.2, 3.3, 2), ellipse(cx + 4, 46.2, 3.3, 2)],
+        "nose": poly((cx - 1.4, 24.1), (cx + 1.4, 24.1), (cx, 25.6)),
+        "eyes": [] if closed or groom or yawn else eyes,
+        "closed": [path(((x - 1.7, y), (x, y + 1), (x + 1.7, y)), 0.6) for x, y in eyes],
+        "stripes": [
+            capsule(cx, 14, cx, 16.8, 0.75),
+            capsule(cx - 2.8, 14.6, cx - 2.2, 17, 0.7),
+            capsule(cx + 2.8, 14.6, cx + 2.2, 17, 0.7),
+            *(
+                capsule(cx + s * 10.3, y, cx + s * 6.5, y + 1, 0.8)
+                for s in (-1, 1)
+                for y in (33, 37.5)
+            ),
+        ],
+    }
+    if slap:
+        pose["legs"] = [capsule(cx - 6, 36, cx - 13, 37.5, 2.4)]
+        pose["paws"] = [ellipse(cx - 13.5, 37.5, 2.8, 2.3), pose["paws"][1]]
+    if groom:
+        pose["paws"] = [pose["paws"][0], ellipse(cx + 2.5, 29.5 - groom, 2.6, 3.2)]
+    if yawn:
+        pose["mouth"] = ellipse(cx, 28, 2.1, 2.5)
+    return pose
 
 
 def cat_walk(step):
-    tip, legs = _WALK_TOP[step // 4 % 2], _WALK_LEGS[step % 4]
-    return (*tip, *_WALK_BODY, legs)
-
-
-def cat_sit(eyes="E", tail=0, yawn=False, groom=0):
-    rows = list(_SIT)
-    rows[1] = rows[1].replace("E", eyes)
-    for x, y in _SIT_TAILS[tail]:
-        _set(rows, x, y, "F")
-    if yawn:
-        _set(rows, 2, 2, "M")
-        _set(rows, 2, 3, "M")
-    if groom:
-        _set(rows, 4, 1 + groom, "W")  # paw goes up to the face and back
-        _set(rows, 3, 5, "F")
-    return tuple(rows)
+    swing, tip = (3, 1, -3, -1)[step], (0, 1, 2, 1)[step]
+    return {
+        "tail": path(((10, 30), (5.5, 24), (5, 16.5), (8 + tip, 11)), 2.4),
+        "far": [capsule(19, 35, 19 - swing, 46.3, 2.2), capsule(34, 35, 34 + swing, 46.3, 2.2)],
+        "legs": [
+            capsule(15.5, 35, 15.5 + swing, 46.3, 2.3),
+            capsule(37.5, 35, 37.5 - swing, 46.3, 2.3),
+        ],
+        "body": capsule(15, 31.5, 37, 31.5, 7.5),
+        "head": ellipse(43.5, 23.5, 8, 7),
+        "ears": [
+            poly((37.6, 20), (39, 10.6), (43.2, 16.6)),
+            poly((44, 16.2), (48.4, 10.2), (49.6, 19)),
+        ],
+        "inner": [poly((45, 16.4), (47.8, 12.6), (48.4, 17.4))],
+        "light": [ellipse(26, 37, 9.5, 2.4), ellipse(48.6, 26.4, 3.4, 2.5)],
+        "paws": [
+            ellipse(16.3 + swing, 46.6, 2.6, 1.4),
+            ellipse(38.3 - swing, 46.6, 2.6, 1.4),
+        ],
+        "nose": circle(51.4, 24.9, 0.95),
+        "eyes": [(46.3, 22.6)],
+        "stripes": [
+            *(capsule(x, 24.8, x + 0.5, 28.4, 0.9) for x in (21, 26, 31)),
+            capsule(43.5, 16.6, 43.5, 19, 0.7),
+        ],
+    }
 
 
 def cat_nap(breath):
-    return (_NAP_BREATH[breath], *_NAP)
+    return {
+        "tail": path(((12, 38.5), (13.5, 43.1), (25, 43.7), (35, 42.9)), 2.6),
+        "body": ellipse(27, 37 - breath * 0.3, 15.5, 7.6 + breath * 0.6),
+        "head": ellipse(41, 37.1, 7.6, 6.2),
+        "ears": [
+            poly((35.4, 34.1), (36.8, 25.7), (40.8, 31.1)),
+            poly((41.6, 30.7), (46.2, 25.9), (47.2, 33.9)),
+        ],
+        "inner": [poly((42.6, 31.1), (45.6, 27.7), (46, 32.3))],
+        "light": [ellipse(45.6, 39.7, 2.8, 2)],
+        "nose": circle(48, 38.5, 0.85),
+        "closed": [path(((40.6, 36.9), (42.2, 37.9), (43.8, 36.9)), 0.6)],
+        "stripes": [capsule(x, 29.7, x + 0.6, 33.1, 0.9) for x in (22, 27.5, 33)],
+    }
 
 
-@functools.lru_cache(maxsize=256)
-def sprite(rows, coat, flip):
-    """Turn a pixel sprite into half-block cells once per pose, coat and facing."""
-    if flip:
-        rows = tuple(r[::-1] for r in rows)
-    name, palette = COATS[coat]
-    if len(rows) % 2:
-        rows = ("." * len(rows[0]), *rows)
+CAT_POSES = {
+    "sit": cat_sit,
+    "groom": lambda paw: cat_sit(groom=paw),
+    "slap": lambda: cat_sit(slap=True),
+    "yawn": lambda: cat_sit(yawn=True),
+    "walk": cat_walk,
+    "nap": cat_nap,
+}
 
-    def color(x, y):
-        ch = rows[y][x]
-        if ch == ".":
-            return None
-        if ch == "F" and name == "calico":
-            return CALICO_PATCHES[(x + 2 * y) // 3 % 3]
-        return {"N": NOSE, "M": MOUTH}.get(ch) or palette[ch]
 
-    lines = []
-    for y in range(0, len(rows), 2):
-        line = []
-        for x in range(len(rows[0])):
-            top, bottom = color(x, y), color(x, y + 1)
-            if top is None and bottom is None:
-                continue
-            if top is None:
-                cell = (c256(bottom), "▄")
-            elif bottom is None:
-                cell = (c256(top), "▀")
-            elif top == bottom:
-                cell = (c256(top), "█")
-            else:
-                cell = (f"{c256(top)}\033[48;5;{bottom}m", "▀")
-            line.append((x, cell))
-        lines.append(tuple(line))
-    nose = next(r.index(c) for r in rows for c in "NM" if c in r)
-    return tuple(lines), nose
+def cat_sprite(coat, pose_key, flip, k):
+    _, fur, dark, light, eye, pattern = COATS[coat]
+    p = CAT_POSES[pose_key[0]](*pose_key[1:])
+    img = Img(math.ceil(7 * k), math.ceil(3 * k), k)
+    dark_fur = sum(fur) < 300
+    edge = (128, 128, 142) if dark_fur else mix(fur, INK, 0.55)
+    outer = [p["tail"], p["body"], p["head"], *p["ears"], *p.get("legs", []), *p.get("far", [])]
+    silhouette = union(*outer)
+    img.fill(grow(silhouette, 1.1), edge)
+    for leg in p.get("far", []):
+        img.fill(leg, mix(fur, INK, 0.3))
+    for part in (p["tail"], p["body"], *p.get("legs", [])):
+        img.fill(part, fur)
+    img.fill(grow(p["head"], 0.7), edge, 0.6)
+    img.fill(p["head"], fur)
+    for ear in p["ears"]:
+        img.fill(ear, fur)
+    cat_markings(img, p, pattern, dark, silhouette)
+    for part in (*p["light"], *p.get("paws", [])):
+        img.fill(part, dark if pattern == "points" and part in p.get("paws", []) else light)
+    for part in p["inner"]:
+        img.fill(part, PINK)
+    img.fill(p["nose"], PINK)
+    if "mouth" in p:
+        img.fill(p["mouth"], (120, 40, 52))
+    for x, y in p.get("eyes", []):
+        img.fill(ellipse(x, y, 1.9, 2.3), eye)
+        img.fill(ellipse(x + 0.1, y + 0.2, 0.85, 1.9), INK)
+        img.fill(circle(x + 0.6, y - 0.8, 0.55), WHITE)
+    if not p.get("eyes"):
+        for lid in p.get("closed", []):
+            img.fill(lid, (170, 170, 182) if dark_fur else INK)
+    return img.mirror() if flip else img
+
+
+def cat_markings(img, p, pattern, dark, silhouette):
+    if pattern == "tabby":
+        for stripe in p["stripes"]:
+            img.fill(clip(stripe, silhouette), dark)
+    elif pattern == "calico":
+        for shape, color in (
+            (ellipse(18, 30, 9, 7), (232, 140, 60)),
+            (ellipse(37, 20, 6, 5), dark),
+            (ellipse(40, 41, 6, 5), (232, 140, 60)),
+        ):
+            img.fill(clip(shape, silhouette), color)
+    elif pattern == "points":
+        for part in (p["tail"], *p["ears"], *p.get("legs", [])):
+            img.fill(part, dark, 0.85)
+        img.fill(clip(grow(union(*p["light"][-1:]), 2.5), p["head"]), dark, 0.7)
+
+
+HEART_FRAMES = 16
+
+
+def heart(cx, cy, s):
+    return union(
+        circle(cx - s * 0.9, cy, s),
+        circle(cx + s * 0.9, cy, s),
+        poly((cx - s * 1.85, cy + s * 0.35), (cx + s * 1.85, cy + s * 0.35), (cx, cy + s * 2.4)),
+    )
+
+
+def hearts_sprite(frame):
+    """Two little hearts floating up from a purring cat."""
+    img = Img(4, 3)
+    for j in (0, 1):
+        p = (frame / HEART_FRAMES + j * 0.5) % 1
+        x = 16 + (j * 2 - 1) * 4 + 2 * math.sin(p * 6 + j)
+        img.fill(heart(x, 42 - p * 36, 1.6 + p), (240, 92, 124), math.sin(math.pi * p))
+    return img
+
+
+SPRITES = {
+    "hearts": hearts_sprite,
+    "knock": knock_sprite,
+    "mug": mug_sprite,
+    "steam": steam_sprite,
+    "pour": pour_sprite,
+    "counter": counter_sprite,
+    "cat": cat_sprite,
+}
+
+
+class Gallery:
+    """Sends each sprite to the terminal once (kitty graphics protocol) and keeps
+    the pictures on screen in sync with what render() asks for."""
+
+    BASE_ID = 0xCAFE00
+
+    def __init__(self):
+        self.images, self.uploads, self.sent, self.objects, self.shown = {}, {}, set(), {}, {}
+
+    def image(self, key, out):
+        if key not in self.images:
+            img = SPRITES[key[0]](*key[1:])
+            iid = self.BASE_ID + len(self.images)
+            data = base64.standard_b64encode(zlib.compress(bytes(img.buf))).decode()
+            chunks = [data[i : i + 4096] for i in range(0, len(data), 4096)] or [""]
+            self.uploads[key] = "".join(
+                f"\033_G{f'a=t,q=2,f=32,o=z,i={iid},s={img.w},v={img.h},' if n == 0 else ''}"
+                f"m={int(n < len(chunks) - 1)};{chunk}\033\\"
+                for n, chunk in enumerate(chunks)
+            )
+            self.images[key] = (iid, img.cols, img.rows)
+        if key not in self.sent:
+            out.append(self.uploads[key])
+            self.sent.add(key)
+        return self.images[key]
+
+    def reset(self):
+        """Start over after a resize: terminals may drop pictures, image data included."""
+        self.sent, self.shown = set(), {}
+        return "\033_Ga=d,d=A,q=2\033\\"
+
+    def sync(self, want):
+        """want: {object: (sprite key, col, row, z)}. Returns the escape codes."""
+        out, shown = [], {}
+        for obj, (key, col, row, z) in want.items():
+            pid = self.objects.setdefault(obj, len(self.objects) + 1)
+            iid, cols, rows = self.image(key, out)
+            spot = (iid, col, row, z)
+            old = self.shown.get(pid)
+            if old != spot:
+                out.append(
+                    f"\033[{row + 1};{max(0, col) + 1}H"
+                    f"\033_Ga=p,i={iid},p={pid},c={cols},r={rows},z={z},C=1,q=2\033\\"
+                )
+                if old and old[0] != iid:
+                    out.append(f"\033_Ga=d,d=i,i={old[0]},p={pid},q=2\033\\")
+            shown[pid] = spot
+        for pid in self.shown.keys() - shown.keys():
+            out.append(f"\033_Ga=d,d=i,i={self.shown[pid][0]},p={pid},q=2\033\\")
+        self.shown = shown
+        return "".join(out)
 
 
 class Cat:
-    """The barista cat. It walks along the counter in front of the cups, hops
-    over to new and finished cups, grooms, yawns, stretches, and naps when the
-    bar is quiet. `x` is the column of its nose."""
+    """The barista cat. It walks along the counter behind the cups, goes over to
+    new and finished cups, grooms, yawns, and naps when the bar is quiet. `x` is
+    the column of its middle."""
+
+    MIN_X = 4  # how close its middle gets to the edges
 
     def __init__(self, now, home):
         self.coat = random.randrange(len(COATS))
         self.name = random.choice(CAT_NAMES)
         self.x = self.goal = float(home)
-        self.dir, self.hop, self.hop_at, self.last = 1, False, -1.0, now
+        self.dir, self.last, self.speed = 1, now, 7.0  # cols/s
         self.plan, self.mode, self.until = [], "nap", now + 4
+        self.pets, self.petted_at, self.target = 0, 0.0, None
 
     @property
     def title(self):
         return f"{self.name} the {COATS[self.coat][0]} cat"
 
-    def go(self, x, hop=False):
-        self.goal, self.mode, self.hop, self.plan = float(x), "walk", hop, []
+    def go(self, x):
+        self.goal, self.mode, self.plan = float(x), "walk", []
 
-    def moving(self, now):
-        return self.mode == "walk" or now - self.hop_at < 0.4
+    def moving(self):
+        return self.mode in ("walk", "purr", "slap")
+
+    def slap(self, now):
+        self.mode, self.until, self.plan = "slap", now + 0.7, [("sit", 2.5)]
+
+    def pet(self, now):
+        """Stop whatever it's doing and purr for a bit."""
+        self.pets += 1
+        self.mode, self.until, self.plan, self.petted_at = "purr", now + 3, [("sit", 1.5)], now
 
     def _arrive(self, now, calm, free_x, home):
-        if self.hop:
-            self.hop, self.hop_at = False, now
         u = random.uniform
         if home is not None:
-            self.plan = [("nap", u(20, 40)), ("stretch", 1.5), ("groom", u(2, 4))]
+            self.plan = [("nap", u(20, 40)), ("sit", 1.5), ("groom", u(2, 4))]
         elif calm and self.x >= free_x and random.random() < 0.5:
-            self.plan = [("nap", u(8, 16)), ("stretch", 1.5)]
+            self.plan = [("nap", u(8, 16)), ("yawn", 1.2)]
         else:
             self.plan = random.choice(
                 [
@@ -378,17 +707,17 @@ class Cat:
     def step(self, now, lane_w, calm, free_x, home=None):
         dt = min(0.5, now - self.last)
         self.last = now
-        max_x = float(max(CAT_MIN_X, lane_w - CAT_RIGHT))
+        max_x = float(max(self.MIN_X, lane_w - self.MIN_X))
         if home is not None and abs(self.goal - home) > 0.5:
             self.go(home)
         if self.mode == "walk":
-            goal = min(max(self.goal, CAT_MIN_X), max_x)
-            if abs(goal - self.x) <= CAT_SPEED * dt:
+            goal = min(max(self.goal, self.MIN_X), max_x)
+            if abs(goal - self.x) <= self.speed * dt:
                 self.x = goal
                 self._arrive(now, calm, free_x, home)
             else:
                 self.dir = 1 if goal > self.x else -1
-                self.x += self.dir * CAT_SPEED * dt
+                self.x += self.dir * self.speed * dt
         elif now >= self.until:
             if self.plan:
                 self._next(now)
@@ -397,182 +726,223 @@ class Cat:
             elif free_x <= max_x and random.random() < 0.6:
                 self.go(random.uniform(free_x, max_x))
             else:
-                self.go(random.uniform(CAT_MIN_X, max_x))
-        self.x = min(max(self.x, CAT_MIN_X), max_x)
+                self.go(random.uniform(self.MIN_X, max_x))
+        self.x = min(max(self.x, self.MIN_X), max_x)
 
     def pose(self, now):
-        """Pixel rows for the current moment, and whether the sprite faces right."""
-        if self.mode == "walk":
-            return cat_walk(int(self.x / 1.5)), self.dir == 1
-        if self.mode == "stretch":
-            return _STRETCH, self.dir == 1
-        if self.mode == "nap":
-            return cat_nap(int(now / 1.2) % 2), self.dir == -1
-        if self.mode == "groom":
-            return cat_sit("C", groom=1 + int(now * 3) % 2), self.dir == -1
-        if self.mode == "yawn":
-            return cat_sit("C", yawn=True), self.dir == -1
-        return cat_sit("C" if now % 5 < 0.3 else "E", tail=int(now * 1.5) % 3), self.dir == -1
+        """The sprite pose for this moment, and whether to mirror it."""
+        mirrored = self.dir < 0
+        poses = {
+            "walk": (("walk", int(now * 8) % 4), mirrored),
+            "nap": (("nap", int(now / 1.2) % 2), mirrored),
+            "groom": (("groom", 1 + int(now * 3) % 2), False),
+            "yawn": (("yawn",), False),
+            "purr": (("sit", int(now * 4) % 3, True), False),
+            "slap": (("slap",), False),
+        }
+        return poses.get(self.mode, (("sit", int(now * 1.5) % 3, now % 5 < 0.25), False))
 
-    def draw(self, canvas, now):
-        rows, faces_right = self.pose(now)
-        # Base sprites face right when walking and left otherwise.
-        flip = not faces_right if self.mode in ("walk", "stretch") else faces_right
-        lines, nose = sprite(rows, self.coat, flip)
-        left = round(self.x) - nose
-        top = canvas.height - len(lines)
-        if 0 <= now - self.hop_at < 0.35 and top > 0:
-            top -= 1
-        for i, line in enumerate(lines):
-            canvas.put(left, top + i, line)
-        if self.mode == "nap":
-            step = int(now * 1.5)
+    def place(self, frame, art, top, k, now):
+        """Put the cat's picture in `frame`, and its zZ in the text `art` rows."""
+        pose, flip = self.pose(now)
+        cols, rows, cat_rows = math.ceil(7 * k), len(art), math.ceil(3 * k)
+        left = round(self.x) - cols // 2
+        frame.pics["cat"] = (("cat", self.coat, pose, flip, k), left, top + rows - cat_rows, 1)
+        if self.mode == "purr":
+            beat = int((now - self.petted_at) / 0.1) % HEART_FRAMES
+            row = max(top, top + rows - cat_rows - 2)
+            frame.pics["hearts"] = (("hearts", beat), left + 2, row, 4)
+        if pose[0] == "nap":
             for i, ch in enumerate("zZ"):
-                k = (step + i) % 3
-                canvas.draw(round(self.x) + 1 + i, top - 1 - k, f"{STEAM_SHADES[2 - k]}{ch}", True)
+                r = rows - cat_rows - (int(now * 1.5) + i) % 2
+                col = left + (cols - 2 if not flip else 1) + i
+                if 0 <= r < rows and 0 <= col < len(art[r]):
+                    art[r][col] = f"{DIM}{ch}{RESET}"
 
 
-# name, cell width, art rows, visible cup width
-LAYOUTS = (("full", CELL, 8, 8), ("short", CELL, 6, 8), ("mini", 8, 4, 6))
+# name, cell width per cup, art rows, mug zoom, steam rows
+LAYOUTS = (("full", 14, 6, 1.0, 4), ("short", 14, 4, 1.0, 2), ("mini", 8, 2, 2 / 3, 0))
+TEXT_LAYOUT = ("text", 14, 0, 1.0, 0)
 HOME_X = 13
 
 
-def mini_steam(t, phase, cpu):
-    row = [" "] * 6
-    columns = (1, 3) if cpu >= WORKING_CPU else (2,)
-    for w, base in enumerate(columns):
-        if len(columns) == 1 and math.sin(t * 1.3 + phase) < -0.2:
-            continue
-        angle = t * 2.4 + w * 0.6 + phase
-        row[base + round(math.sin(angle))] = "(" if math.cos(angle) > 0 else ")"
-    return f"{STEAM_SHADES[2]}{''.join(row)}{RESET}"
+def pick_layout(count, width, rows, gfx):
+    """The roomiest layout whose counters all fit on screen."""
+    for layout in LAYOUTS if gfx else (TEXT_LAYOUT,):
+        per_row = max(1, (width - 2) // layout[1])
+        if -(-count // per_row) * (layout[2] + 4) <= rows:
+            break
+    return layout, per_row
 
 
-def mini_cup(color, level, liquid=COFFEE):
-    inner = f"{liquid}▓▓▓{color}" if level else "   "
-    return [f"{color}┌───┐ {RESET}", f"{color}│{inner}├╯{RESET}", f"{color}└───┘ {RESET}"]
-
-
-def cup_cell(state, pid, now, layout):
-    """Art rows and two label lines for one cup on the counter."""
-    mini = layout == "mini"
+def cup_cell(state, pid, now, layout, spot):
+    """Pictures and two label lines for one cup on the counter at (col, top)."""
+    _, _, art_h, k, steam_rows = layout
+    col, top = spot
+    mug_row = top + art_h - math.ceil(3 * k)
+    over = mug_row + 1 - steam_rows  # steam and pours overlap the mug's top row
+    pics = {}
     if pid in state["leaving"]:
-        kind, tty_name, ended = state["leaving"][pid]
-        progress = min(1.0, (now - ended) / LEAVE_S)
-        if mini:
-            art = ["", *mini_cup(EMPTY, progress < 0.5, EMPTY)]
-        else:
-            art = [""] * 3 + cup_rows(EMPTY, round(3 * (1 - progress)), EMPTY, EMPTY)
-        status = f"{GOLD}✔ served{RESET}" if not mini else f"{GOLD}✔{RESET}"
+        kind, tty_name, ended, _ = state["leaving"][pid]
+        fill = 2 - min(2, int((now - ended) / DRAIN_S * 3))
+        pics[("mug", pid)] = (("mug", SERVED_GLAZE, fill, k), col, mug_row, 2)
+        knocked = state["knocked"].get(pid, now + 1)
+        if knocked <= now:
+            frame = min(KNOCK_FRAMES - 1, int((now - knocked) / KNOCK_S * KNOCK_FRAMES))
+            up = math.ceil(4 * k) - math.ceil(3 * k)
+            knock = ("knock", SERVED_GLAZE, frame, k)
+            pics[("mug", pid)] = (knock, col - round(4 * k), mug_row - up, 2)
+        status = f"{GOLD}✔ served{RESET}" if k == 1 else f"{GOLD}✔{RESET}"
     else:
         kind, tty_name, started, cpu = state["live"][pid]
-        color = AGENTS[kind][1]
+        glaze = AGENTS[kind][2]
         seen = state["first_seen"].get(pid, 0)
         # Sessions already running at startup are served full; new ones pour in.
-        fill = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
-        if fill < 1:
-            if mini:
-                art = [f"{COFFEE}  ┃{RESET}", *mini_cup(color, fill >= 0.5)]
-            else:
-                art = pour_rows(now) + cup_rows(color, int(fill * 4))
+        poured = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
+        if poured < 1:
+            pics[("mug", pid)] = (("mug", glaze, int(poured * 2), k), col, mug_row, 2)
+            if steam_rows:
+                pics[("pour", pid)] = (("pour", int(now * 10) % 4, steam_rows), col, over, 3)
             status = f"{GOLD}pouring…{RESET}"
         else:
-            if mini:
-                art = [mini_steam(now, pid % 7, cpu), *mini_cup(color, 1)]
-            else:
-                art = steam_rows(now, pid % 7, cpu) + cup_rows(color, 3)
+            pics[("mug", pid)] = (("mug", glaze, 2, k), col, mug_row, 2)
+            if steam_rows:
+                level = 2 if cpu >= BUSY_CPU else (1 if cpu >= WORKING_CPU else 0)
+                frame = (int(now / 0.12) + pid) % STEAM_FRAMES
+                pics[("steam", pid)] = (("steam", level, frame, steam_rows), col, over, 3)
             status = f"{DIM}{fmt_dur(now - started)}{RESET}"
-    if layout == "short":
-        art = art[2:]
-    name, color = AGENTS[kind]
+    name, color, _ = AGENTS[kind]
     label = f"{color}{name}{RESET}"
-    if not mini:
+    if k == 1:
         label += f" {DIM}{tty_name.replace('ttys', 's')}{RESET}"
-    return art, label, status
+    return pics, label, status
 
 
-def pick_layout(count, width, rows):
-    """The roomiest layout whose counters all fit on screen."""
-    for name, cell, art_h, cup_w in LAYOUTS:  # noqa: B007 (used after the loop)
-        per_row = max(1, (width - 2) // cell)
-        if -(-count // per_row) * (art_h + 4) <= rows:
-            break
-    return name, cell, art_h, cup_w, per_row
+class Frame:
+    """One screen being built: text lines, and the pictures to show on them."""
+
+    def __init__(self, width, gfx):
+        self.width, self.gfx, self.out, self.pics = width, gfx, [], {}
+
+    def art(self, rows):
+        return [[" "] * self.width for _ in range(rows)]
+
+    def add(self, art):
+        self.out += ["".join(row).rstrip() for row in art]
+
+    def counter(self):
+        if self.gfx:
+            self.pics[("counter", len(self.out))] = (("counter", self.width), 0, len(self.out), 0)
+            self.out.append("")
+        else:
+            self.out.append(f"{WOOD}{'▀' * self.width}{RESET}")
+
+
+def render_idle(state, now, frame):
+    """An empty bar: a clean cup and a napping cat."""
+    if frame.gfx:
+        top, art = len(frame.out), frame.art(6)
+        frame.pics["idle"] = (("mug", SERVED_GLAZE, 0, 1.0), 2, top + 3, 2)
+        state["cat"].step(now, frame.width, calm=True, free_x=HOME_X, home=HOME_X)
+        state["cat"].place(frame, art, top, 1.0, now)
+        frame.add(art)
+    frame.counter()
+    quip = random.Random(int(now // 10)).choice(IDLE_QUIPS)
+    frame.out += [f"  {DIM}{quip}{RESET}", ""]
+
+
+def cat_visit(state, now):
+    """When the cat reaches a finished cup, it usually swats it off the bar."""
+    cat = state["cat"]
+    if cat.target is None or cat.mode == "walk":
+        return
+    pid, cat.target = cat.target, None
+    if pid in state["leaving"] and pid not in state["knocked"] and random.random() < 0.75:
+        cat.slap(now)
+        state["knocked"][pid] = now + 0.3  # the paw lands a moment after the swing starts
+        who = AGENTS[state["leaving"][pid][0]][0]
+        state["toast"] = (f"{cat.name} knocked {who}'s cup off the bar.", now + 4)
+
+
+def gone(state, pid, now):
+    """Whether a finished cup has left the counter."""
+    if pid in state["knocked"]:
+        return now > state["knocked"][pid] + KNOCK_S
+    return now > state["leaving"][pid][2] + SERVED_S
+
+
+def render_cups(state, now, pids, frame, room_rows):
+    """Rows of cups on counters, with the cat behind the last row."""
+    cat = state["cat"]
+    calm = all(cpu < WORKING_CPU for *_, cpu in state["live"].values())
+    layout, per_row = pick_layout(len(pids), frame.width, room_rows, frame.gfx)
+    _, cell, art_h, k, _ = layout
+    # Even mini cups can run out of room: show what fits and count the rest.
+    room = max(1, room_rows // (art_h + 4)) * per_row
+    hidden = max(0, len(pids) - room)
+    groups = [pids[i : i + per_row] for i in range(0, min(room, len(pids)), per_row)]
+    for gi, group in enumerate(groups):
+        top, art, cells = len(frame.out), frame.art(art_h), []
+        for ci, pid in enumerate(group):
+            pics, label, status = cup_cell(state, pid, now, layout, (2 + ci * cell, top))
+            if frame.gfx:
+                frame.pics.update(pics)
+            cells.append((label, status))
+        if frame.gfx and gi == len(groups) - 1:
+            visit = state.pop("visit", None)
+            if visit in group:
+                cat.go(2 + group.index(visit) * cell + math.ceil(6 * k) + 3)
+                cat.target = visit
+            cat.step(now, frame.width, calm, free_x=2 + len(group) * cell + 3)
+            cat_visit(state, now)
+            cat.place(frame, art, top, k, now)
+        frame.add(art)
+        frame.counter()
+        frame.out.append("  " + "".join(pad(label, cell) for label, _ in cells))
+        frame.out.append("  " + "".join(pad(status, cell) for _, status in cells))
+        frame.out.append("")
+    if hidden:
+        frame.out[-1] = f"  {DIM}+{hidden} more cups behind the counter{RESET}"
 
 
 def render(state, now):
-    """Return the full screen for this moment as a list of lines."""
+    """The text lines for this moment, and the pictures to show on top of them."""
     cols, term_rows = shutil.get_terminal_size((80, 24))
-    width = min(cols, 96)
-    counter = f"{WOOD}{'▀' * width}{RESET}"
-    cat = state["cat"]
-    calm = all(cpu < WORKING_CPU for *_, cpu in state["live"].values())
-    out = [
+    frame = Frame(min(cols, 96), state["gfx"])
+    frame.out = [
         f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
-        f"{RESET}   {DIM}q to close the bar{RESET}",
-        DIM + "─" * width + RESET,
+        f"{RESET}   {DIM}p to pet {state['cat'].name} · q to close{RESET}",
+        DIM + "─" * frame.width + RESET,
     ]
-
-    pids = sorted(state["live"], key=lambda p: state["live"][p][2])
-    pids += sorted(state["leaving"], key=lambda p: state["leaving"][p][2])
-    if not pids:
-        canvas = Canvas(width, 8)
-        for r, row in enumerate(cup_rows(EMPTY, 0)):
-            canvas.draw(2, 3 + r, row)
-        cat.step(now, width, calm=True, free_x=HOME_X, home=HOME_X)
-        cat.draw(canvas, now)
-        quip = random.Random(int(now // 10)).choice(IDLE_QUIPS)
-        out += [*canvas.lines(), counter, f"  {DIM}{quip}{RESET}", ""]
+    # Cups keep their place on the counter, oldest session first.
+    started = {p: s for p, (_, _, s, _) in state["live"].items()}
+    started.update((p, c[3]) for p, c in state["leaving"].items() if not gone(state, p, now))
+    pids = sorted(started, key=started.get)
+    if pids:
+        render_cups(state, now, pids, frame, term_rows - 5)
     else:
-        layout, cell, art_h, cup_w, per_row = pick_layout(len(pids), width, term_rows - 5)
-        # Even mini cups can run out of room: show what fits and count the rest.
-        room = max(1, (term_rows - 5) // (art_h + 4)) * per_row
-        hidden = len(pids) - room if len(pids) > room else 0
-        pids = pids[:room]
-        groups = [pids[i : i + per_row] for i in range(0, len(pids), per_row)]
-        for gi, group in enumerate(groups):
-            cells = [cup_cell(state, pid, now, layout) for pid in group]
-            canvas = Canvas(width, art_h)
-            for ci, (art, _, _) in enumerate(cells):
-                for r, row in enumerate(art):
-                    canvas.draw(2 + ci * cell, r, row)
-            if gi == len(groups) - 1:
-                visit = state.pop("visit", None)
-                if visit in group:
-                    cat.go(2 + group.index(visit) * cell + cup_w + 2, hop=True)
-                cat.step(now, width, calm, free_x=2 + len(group) * cell + 2)
-                cat.draw(canvas, now)
-            out += canvas.lines()
-            out.append(counter)
-            out.append("  " + "".join(pad(label, cell) for _, label, _ in cells))
-            out.append("  " + "".join(pad(status, cell) for _, _, status in cells))
-            out.append("")
-        if hidden:
-            out[-1] = f"  {DIM}+{hidden} more cups behind the counter{RESET}"
-
+        render_idle(state, now, frame)
     if state["toast"] and now < state["toast"][1]:
-        out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
+        frame.out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
     else:
-        out.append(f"  {DIM}“{QUIPS[int(now // 8) % len(QUIPS)]}”{RESET}")
-    return out
+        frame.out.append(f"  {DIM}“{QUIPS[int(now // 8) % len(QUIPS)]}”{RESET}")
+    return frame.out, frame.pics
 
 
 def frame_delay(state):
     """Animate smoothly while something moves; tick slowly while everything naps."""
-    if state["live"] and any(cpu >= WORKING_CPU for *_, cpu in state["live"].values()):
-        return FRAME_S
-    if state["leaving"] or state["cat"].moving(time.time()):
-        return FRAME_S
-    if any(state["first_seen"].get(p, 0) > time.time() - POUR_S for p in state["live"]):
+    if not state["gfx"]:
+        return IDLE_FRAME_S
+    if state["live"] or state["leaving"] or state["cat"].moving():
         return FRAME_S
     return IDLE_FRAME_S
 
 
 def update(state):
     now = time.time()
-    for pid, (_, _, ended) in list(state["leaving"].items()):
-        if now - ended > LEAVE_S:
-            del state["leaving"][pid]
+    for pid in [p for p in state["leaving"] if gone(state, p, now)]:
+        del state["leaving"][pid]
+        state["knocked"].pop(pid, None)
     live = scan_agents()
     if live is None:
         return
@@ -584,7 +954,7 @@ def update(state):
     for pid in state["live"].keys() - live.keys():
         kind, tty_name, started, _ = state["live"][pid]
         dur = now - started
-        state["leaving"][pid] = (kind, tty_name, now)
+        state["leaving"][pid] = (kind, tty_name, now, started)
         state["visit"] = pid
         state["served"] += 1
         state["longest"] = max(state["longest"], (dur, AGENTS[kind][0]))
@@ -592,6 +962,12 @@ def update(state):
         state["first_seen"].pop(pid, None)
     state["live"] = live
     state["initialized"] = True
+    # Rush hour: lots of agents working at once. The cat hurries.
+    working = sum(cpu >= WORKING_CPU for *_, cpu in live.values())
+    if working >= RUSH_AT and not state["rush"]:
+        state["toast"] = (f"Rush hour! {working} agents brewing at once.", now + 5)
+    state["rush"] = working >= RUSH_AT
+    state["cat"].speed = 12.0 if state["rush"] else 7.0
 
 
 def receipt(state):
@@ -604,6 +980,8 @@ def receipt(state):
         ("Still brewing", str(len(state["live"]))),
         ("Barista", state["cat"].name),
     ]
+    if state["cat"].pets:
+        rows.append(("Times petted", str(state["cat"].pets)))
     if state["longest"][0] > 0:
         rows.append(("Longest pour", f"{fmt_dur(state['longest'][0])} ({state['longest'][1]})"))
     print(f"\n  {line}\n  {'CAFFE RECEIPT':^{w}}\n  {line}")
@@ -617,26 +995,77 @@ def start_caffeinate():
     return subprocess.Popen(["/usr/bin/caffeinate", "-dimsu", "-w", str(os.getpid())])
 
 
-def main():
+def kitty_graphics(fd):
+    """Ask the terminal whether it can show pictures (kitty graphics protocol).
+    The device-attributes query after it is answered by every terminal, so we
+    never wait longer than needed."""
+    if os.environ.get("TMUX"):
+        return False
+    sys.stdout.write("\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033[c")
+    sys.stdout.flush()
+    reply, deadline = b"", time.time() + 1.0
+    while time.time() < deadline and not re.search(rb"\033\[\?[\d;]*c", reply):
+        if select.select([fd], [], [], 0.05)[0]:
+            reply += os.read(fd, 1024)
+    return b"_Gi=31;OK" in reply
+
+
+def draw(state, now, gallery, shown):
+    """Put this moment on screen. Returns the text lines now showing."""
+    lines, pics = render(state, now)
+    height = shutil.get_terminal_size((80, 24)).lines - 1
+    lines = lines[:height]
+    # Only rewrite lines that changed, so a quiet bar costs almost nothing.
+    out = [
+        f"\033[{y + 1};1H{line}\033[K"
+        for y, line in enumerate(lines)
+        if y >= len(shown) or shown[y] != line
+    ]
+    if len(lines) < len(shown):
+        out.append(f"\033[{len(lines) + 1};1H\033[J")
+    if state["gfx"]:
+        out.append(gallery.sync({o: p for o, p in pics.items() if p[2] < height}))
+    if out:
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+    return lines
+
+
+def on_key(state, key):
+    """Handle a key press. Returns True to close the bar."""
+    if key == "p":
+        state["cat"].pet(time.time())
+        state["toast"] = (f"{state['cat'].name} purrs. ♥", time.time() + 3)
+    return key == "q"
+
+
+def check_args():
     if sys.argv[1:] in (["-h"], ["--help"]):
         print(__doc__.strip())
-        return
+        sys.exit(0)
     if sys.argv[1:]:
         sys.exit("usage: caffe   (no arguments; press q to quit)")
     if not sys.stdin.isatty():
         sys.exit("caffe needs an interactive terminal.")
+
+
+def main():
+    check_args()
     caf = start_caffeinate()
     cat = Cat(time.time(), HOME_X)
     state = {
         "start": time.time(),
         "live": {},
         "leaving": {},
+        "knocked": {},
         "first_seen": {},
         "served": 0,
         "longest": (0, ""),
         "cat": cat,
         "toast": (f"{cat.title} is on shift today.", time.time() + 6),
         "initialized": False,
+        "gfx": False,
+        "rush": False,
     }
 
     def on_term(*_):
@@ -647,9 +1076,11 @@ def main():
     signal.signal(signal.SIGWINCH, lambda *_: resized.__setitem__(0, True))
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
+    gallery = Gallery()
     sys.stdout.write("\033[?1049h\033[?25l")
     try:
         tty.setcbreak(fd)
+        state["gfx"] = kitty_graphics(fd)
         last_poll, shown = 0.0, []
         while True:
             now = time.time()
@@ -658,22 +1089,10 @@ def main():
                 last_poll = now
             if resized[0]:
                 resized[0], shown = False, []
-                sys.stdout.write("\033[2J")
-            lines = render(state, now)[: shutil.get_terminal_size((80, 24)).lines - 1]
-            # Only rewrite lines that changed, so a quiet bar costs almost nothing.
-            out = [
-                f"\033[{y + 1};1H{line}\033[K"
-                for y, line in enumerate(lines)
-                if y >= len(shown) or shown[y] != line
-            ]
-            if len(lines) < len(shown):
-                out.append(f"\033[{len(lines) + 1};1H\033[J")
-            if out:
-                sys.stdout.write("".join(out))
-                sys.stdout.flush()
-            shown = lines
+                sys.stdout.write((gallery.reset() if state["gfx"] else "") + "\033[2J")
+            shown = draw(state, now, gallery, shown)
             r, _, _ = select.select([sys.stdin], [], [], frame_delay(state))
-            if r and sys.stdin.read(1).lower() == "q":
+            if r and on_key(state, sys.stdin.read(1).lower()):
                 break
             if caf.poll() is not None:
                 caf = start_caffeinate()
@@ -681,6 +1100,8 @@ def main():
         pass
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if state["gfx"]:
+            sys.stdout.write("\033_Ga=d,d=A,q=2\033\\")
         sys.stdout.write("\033[?25h\033[?1049l")
         sys.stdout.flush()
         caf.terminate()
