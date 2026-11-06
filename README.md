@@ -38,7 +38,8 @@ cup for every AI coding agent you have running.
   out.
 - **Time of day.** Mornings open with a greeting. From 23:00 the cat takes the
   night shift: it walks slower, naps more and gets its own quips. At 14:30
-  there's fika: a kanelbulle on the counter, or a lussekatt in December.
+  there's fika: a kanelbulle on the counter, or a lussekatt in December, and
+  the cat sneaks a bite now and then until it's gone.
 - **Rush hour.** With four or more agents working at once, the cat hurries.
 - **Lots of agents?** Cups shrink to fit the screen. Anything that still
   doesn't fit is counted below the counter.

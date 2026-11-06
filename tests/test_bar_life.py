@@ -79,9 +79,18 @@ class TimeOfDayTests(unittest.TestCase):
         caffe["bar_clock"](state, at(14, 30))
         self.assertIn("kanelbulle", state["toast"][0])
         frame = play(state, at(14, 31), at(14, 31) + 0.2)
-        self.assertEqual(frame.pics["bun"][0], ("bun", "kanelbulle"))
+        self.assertEqual(frame.pics["bun"][0], ("bun", "kanelbulle", 0))
         frame = play(state, at(14, 31, month=12), at(14, 31, month=12) + 0.2)
-        self.assertEqual(frame.pics["bun"][0], ("bun", "lussekatt"))
+        self.assertEqual(frame.pics["bun"][0], ("bun", "lussekatt", 0))
+
+    def test_cat_nibbles_the_bun_until_it_is_gone(self):
+        state = bar(due={"nibble"})
+        frame = play(state, at(14, 40), at(14, 40) + 8)
+        self.assertEqual(state["bun_bites"], 1)
+        self.assertEqual(frame.pics["bun"][0], ("bun", "kanelbulle", 1))
+        self.assertIn("takes a bite", state["toast"][0])
+        state["bun_bites"] = caffe["BUN_BITES"]
+        self.assertNotIn("bun", play(state, at(14, 50), at(14, 50) + 0.2).pics)
 
     def test_night_cat_is_sleepy_and_slow(self):
         state = bar(rush=False)

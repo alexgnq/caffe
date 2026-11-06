@@ -66,7 +66,8 @@ RUSH_AT = 4  # agents working at once
 LOW_BATTERY, BATTERY_POLL_S = 20, 30.0  # % at which the display may sleep
 MOUSE_ODDS, GUEST_ODDS = 1 / 100, 1 / 300  # per poll: a mouse every ~5 min, a guest every ~15
 CHASE_SPEED, TREATS_PER_10_MIN = 15.0, 3
-BUSY_MODES = ("purr", "slap", "eat", "hiss")  # the cat finishes these before anything else
+NIBBLE_ODDS, BUN_BITES = 1 / 120, 4  # per poll at fika: a bite every ~6 min, gone in four
+BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss")  # the cat finishes these first
 
 QUIPS = [
     "Brewing tokens, one sip at a time.",
@@ -856,25 +857,30 @@ def treat_sprite(bites, k):
     return img
 
 
-def bun_sprite(kind):
-    """Fika: a kanelbulle, or a saffron lussekatt in December."""
-    img = Img(3, 1)
-    img.fill(ellipse(12, 15.2, 10, 1), INK, 0.3)
+def bun_sprite(kind, bites=0):
+    """Fika: a kanelbulle, or a saffron lussekatt in December, bitten from the
+    right where the cat sits."""
+    img, left = Img(3, 1), rbox(-1, 0, 23 - bites * 5.5, 16, 0)
+
+    def fill(shape, *paint):
+        img.fill(clip(shape, left), *paint)
+
+    fill(ellipse(12, 15.2, 10, 1), INK, 0.3)
     if kind == "lussekatt":
         # An S: a strand coiled one way at the left end, and the other way at the right.
         coil = [(a * 0.6 * math.cos(a), a * 0.45 * math.sin(a)) for a in (i / 3 for i in range(19))]
         strand = [(7 + x, 11 + y) for x, y in coil] + [(17 - x, 11 - y) for x, y in coil[::-1]]
-        img.fill(path(strand, 2.6), (196, 128, 36))
-        img.fill(path(strand, 1.9), (240, 182, 62))
+        fill(path(strand, 2.6), (196, 128, 36))
+        fill(path(strand, 1.9), (240, 182, 62))
         for x in (7, 17):
-            img.fill(circle(x, 11, 1.1), (70, 30, 30))
+            fill(circle(x, 11, 1.1), (70, 30, 30))
         return img
-    img.fill(ellipse(12, 12, 10, 3.6), (176, 108, 52))
-    img.fill(ellipse(12, 10.2, 8.5, 4), (210, 140, 70))
+    fill(ellipse(12, 12, 10, 3.6), (176, 108, 52))
+    fill(ellipse(12, 10.2, 8.5, 4), (210, 140, 70))
     spiral = [(12 + a * 0.75 * math.cos(a), 10.4 + a * 0.32 * math.sin(a)) for a in range(1, 11)]
-    img.fill(path(spiral, 0.55), (132, 76, 38))
+    fill(path(spiral, 0.55), (132, 76, 38))
     for x, y in ((7, 8.5), (10, 7), (15, 7.5), (17.5, 10), (9.5, 11.5), (14, 12)):
-        img.fill(circle(x, y, 0.7), WHITE)
+        fill(circle(x, y, 0.7), WHITE)
     return img
 
 
@@ -970,7 +976,7 @@ class Cat:
         self.goal, self.mode, self.plan, self.chasing = float(x), "walk", [], False
 
     def moving(self):
-        return self.mode in ("walk", "purr", "slap", "eat", "hiss")
+        return self.mode in ("walk", *BUSY_MODES)
 
     def free(self):
         """Not busy with a cup, a mouse, a treat or a pet."""
@@ -1057,6 +1063,7 @@ class Cat:
             "yawn": (("yawn",), False),
             "purr": (("sit", int(now * 4) % 3, True), False),
             "eat": (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False),
+            "nibble": (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False),
             "hiss": (("hiss",), False),
             "slap": (
                 ("slap", 1 if self.until - now > 1.3 else (2 if self.until - now > 1 else 3)),
@@ -1253,9 +1260,29 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
         run_guest(state, now, lane_ends)
         if "guest" in state:
             state["guest"]["cat"].place(frame, art, top, k, now)
-    if daypart(now) == "fika" and free_x <= lane - 5:
+    bites = state.get("bun_bites", 0)
+    if daypart(now) == "fika" and free_x <= lane - 8 and bites < BUN_BITES:
         bun = "lussekatt" if time.localtime(now).tm_mon == 12 else "kanelbulle"
-        frame.pics["bun"] = (("bun", bun), lane - 5, top + len(art) - 1, 2)
+        if home is None:
+            nibble(state, now, bun, lane_ends[1])
+        frame.pics["bun"] = (("bun", bun, bites), lane - 8, top + len(art) - 1, 2)
+
+
+def nibble(state, now, bun, spot):
+    """Now and then at fika, the cat walks over to the bun at the end of the
+    counter and takes a bite."""
+    cat, due = state["cat"], state["due"]
+    if "nibble" in due and "mouse" not in state and "guest" not in state and cat.free():
+        due.discard("nibble")
+        cat.go(spot)
+        state["snack"] = True
+    elif state.get("snack") and cat.mode != "walk":
+        del state["snack"]
+        if abs(cat.x - spot) < 1 and cat.free():  # it got there without being distracted
+            cat.mode, cat.until, cat.plan = "nibble", now + 2.4, [("sit", 1.5)]
+            state["bun_bites"] = bites = state.get("bun_bites", 0) + 1
+            done = f"{cat.name} finished the {bun}." if bites >= BUN_BITES else ""
+            state["toast"] = (done or f"{cat.name} takes a bite of the {bun}.", now + 3)
 
 
 def run_mouse(state, now, frame, spot, lane_ends):
@@ -1481,10 +1508,16 @@ def bar_clock(state, now):
     if part == "fika" and state.get("daypart") not in (None, "fika"):
         bun = "lussekatt" if time.localtime(now).tm_mon == 12 else "kanelbulle"
         state["toast"] = (f"Fika! {cat.name} sets out a {bun}.", now + 6)
+        state["bun_bites"] = 0
     state["daypart"] = part
     cat.sleepy = part == "night"
     cat.speed = 12.0 if state["rush"] else (5.0 if cat.sleepy else 7.0)
     due = state.setdefault("due", set())
+    if part != "fika":
+        due.discard("nibble")
+        state.pop("snack", None)
+    elif random.random() < NIBBLE_ODDS:
+        due.add("nibble")
     if random.random() < MOUSE_ODDS * (2 if cat.sleepy else 1):  # mice prefer the night
         due.add("mouse")
     if random.random() < GUEST_ODDS:
