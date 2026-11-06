@@ -1,6 +1,8 @@
 import runpy
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 caffe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "caffe"))
@@ -9,12 +11,55 @@ caffe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "caffe"))
 def sessions(rows):
     output, names = [], []
     for pid, parent, tty, cpu, command, args in rows:
-        output.append(f"{pid} {parent} {tty} {cpu} 01:00 {args}")
+        output.append(f"{pid} {parent} {tty} {cpu} 0 01:00 {args}")
         names.append(f"{pid} {command}")
     return caffe["agent_sessions"]("\n".join(output), "\n".join(names), 1000)
 
 
 class AgentDetectionTests(unittest.TestCase):
+    def test_orphaned_crash_reporters_do_not_become_apps(self):
+        helper = (
+            "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/"
+            "Versions/156.0/Helpers/browser_crashpad_handler"
+        )
+        found = sessions(
+            [
+                (20, 1, "??", 2, "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT", "ChatGPT"),
+                (21, 20, "??", 3, helper, "browser_crashpad_handler"),
+                (22, 1, "??", 4, helper, "browser_crashpad_handler"),
+            ]
+        )
+        self.assertEqual(found, {(20, "codex"): ("codex", "app:Codex", 940, 5, 0)})
+        self.assertEqual(sessions([(22, 1, "??", 4, helper, "browser_crashpad_handler")]), {})
+
+    def test_scanner_totals_cpu_and_ram_for_the_whole_app_tree(self):
+        output = "\n".join(
+            (
+                "20 1 ?? 2.0 102400 01:00 Codex",
+                "21 20 ?? 4.0 51200 00:30 renderer",
+                "22 21 ?? 3.0 25600 00:20 codex app-server",
+                "30 1 ?? 90.0 1048576 01:00 unrelated",
+            )
+        )
+        names = "\n".join(
+            (
+                "20 /Applications/Codex.app/Contents/MacOS/Codex",
+                "21 /Applications/Codex.app/Contents/Frameworks/Helper",
+                "22 /bin/codex",
+                "30 /bin/unrelated",
+            )
+        )
+        with (
+            patch(
+                "subprocess.run",
+                side_effect=[SimpleNamespace(stdout=output), SimpleNamespace(stdout=names)],
+            ) as run,
+            patch("time.time", return_value=1000),
+        ):
+            found = caffe["scan_agents"]()
+        self.assertIn("rss=", run.call_args_list[0].args[0][-1])
+        self.assertEqual(found, {(20, "codex"): ("codex", "app:Codex", 940, 9.0, 175.0)})
+
     def test_ui_drinks_represent_apps_instead_of_their_agent_backends(self):
         found = sessions(
             [
@@ -56,7 +101,7 @@ class AgentDetectionTests(unittest.TestCase):
             ]
         )
         self.assertEqual(set(found), {10, 12})
-        self.assertEqual(found[10], ("codex", "ttys001", 940, 5))
+        self.assertEqual(found[10], ("codex", "ttys001", 940, 5, 0))
 
     def test_vscode_identity_survives_agent_backend_changes(self):
         editor = [
@@ -95,7 +140,7 @@ class AgentDetectionTests(unittest.TestCase):
                 )
                 self.assertEqual(set(found), {(20, kind)})
                 self.assertTrue(found[20, kind][1].startswith("app:"))
-                self.assertEqual(found[20, kind][3], 7)
+                self.assertEqual(found[20, kind][3], 8)
 
     def test_claude_app_is_visible_without_a_local_cli(self):
         found = sessions(
@@ -103,7 +148,7 @@ class AgentDetectionTests(unittest.TestCase):
                 (20, 1, "??", 0, "/Applications/Claude.app/Contents/MacOS/Claude", "Claude"),
             ]
         )
-        self.assertEqual(found, {(20, "claude"): ("claude", "app:Claude", 940, 0)})
+        self.assertEqual(found, {(20, "claude"): ("claude", "app:Claude", 940, 0, 0)})
 
     def test_editor_app_and_terminal_sessions_stay_separate(self):
         base = "/Applications/Visual Studio Code.app/Contents"
@@ -117,7 +162,7 @@ class AgentDetectionTests(unittest.TestCase):
             ]
         )
         self.assertEqual(set(found), {(30, "vscode"), 34})
-        self.assertEqual(found[30, "vscode"], ("vscode", "app:VS Code", 940, 6))
+        self.assertEqual(found[30, "vscode"], ("vscode", "app:VS Code", 940, 9, 0))
         self.assertEqual(found[34][1], "ttys003")
         self.assertEqual(
             set(sessions([(30, 1, "??", 0, f"{base}/MacOS/Code", "Code")])), {(30, "vscode")}
@@ -136,7 +181,7 @@ class AgentDetectionTests(unittest.TestCase):
                     ]
                 )
                 self.assertEqual(set(found), {42, 43, 44})
-                self.assertEqual(found[42], ("codex", "ttys004", 940, 2))
+                self.assertEqual(found[42], ("codex", "ttys004", 940, 2, 0))
 
 
 if __name__ == "__main__":

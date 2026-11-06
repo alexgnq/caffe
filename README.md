@@ -14,7 +14,13 @@ cup for every AI coding agent you have running.
   belong to that app's drink. These cups track open applications, rather than
   individual chats, and stay on the bar while the app is open.
 - **Steam follows the work.** The more CPU an agent uses, the more its cup
-  steams.
+  steams. App lattes show total CPU percentage and resident RAM for the app
+  and its descendants. They steam lightly at 3% CPU or 256 MiB, and heavily
+  at 25% CPU or 1 GiB. Resource totals include terminal agents hosted by VS Code,
+  which also retain their individual espressos.
+- **Copilot session mugs.** Running local Copilot app sessions and chats get
+  individual espressos labeled `Agent` in the spawning app's color.
+  They steam and show `working`; idle sessions disappear without being served.
 - **A barista cat.** A random name and coat each launch. It walks behind the
   cups, checks on new ones, grooms, yawns and naps when things are quiet. It
   knocks every finished cup off the bar.
@@ -24,7 +30,7 @@ cup for every AI coding agent you have running.
   doesn't fit is counted below the counter.
 - **Receipt on quit:** an order number, your espressos per agent, the cups the
   cat broke, time awake against total agent time, the longest session, and the
-  cat's tip in pets. Open apps don't count.
+  cat's tip in pets. Open apps and Copilot activity-only mugs don't count.
 
 ## Install
 
@@ -57,11 +63,19 @@ To update to the latest version:
 caffe update
 ```
 
+`caffe update` installs the upstream version and replaces local customizations,
+including Copilot session tracking and app resource reporting.
+
 ## How it works
 
 - Every 3 seconds, `ps` is checked for `copilot`, `codex`, `claude` and `pi`
   processes attached to a terminal, and for the Codex, Copilot, Claude and
   VS Code apps. An app's helpers and agent backends count towards its latte.
+- Copilot's local, running, unarchived project, agent and general-chat sessions
+  are read from `~/.copilot/data.db` in read-only mode. Only session metadata
+  is read, never conversation history. This optional integration uses an
+  undocumented schema; if a read fails, existing session mugs are kept until
+  the next successful read.
 - `caffeinate` is tied to caffe's process ID, so the Mac can sleep again as soon
   as caffe exits, even if it's killed.
 - The art is drawn in Python when it's first needed and sent to the terminal

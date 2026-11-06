@@ -8,22 +8,50 @@ caffe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "caffe"))
 
 
 class DrinkTests(unittest.TestCase):
-    def test_settled_latte_has_no_runtime_or_source_label(self):
+    def test_app_and_terminal_labels_keep_their_names(self):
+        for kind in ("codex", "copilot", "vscode"):
+            name, color, _ = caffe["DRINKS"][kind]
+            self.assertEqual(
+                caffe["cup_label"](kind, f"app:{name}", 1),
+                f"{color}{name}{caffe['RESET']}",
+            )
+        for kind in caffe["AGENTS"]:
+            name, color, _ = caffe["DRINKS"][kind]
+            self.assertEqual(
+                caffe["cup_label"](kind, "ttys001", 1),
+                f"{color}{name}{caffe['RESET']} {caffe['DIM']}s001{caffe['RESET']}",
+            )
+
+    def test_latte_steam_and_working_state_follow_cpu_or_memory(self):
+        for cpu, memory, level in ((0, 64, 0), (3, 0, 1), (0, 256, 1), (25, 0, 2), (0, 1024, 2)):
+            with self.subTest(cpu=cpu, memory=memory):
+                session = ("codex", "app:Codex", 0, cpu, memory)
+                state = {"live": {1: session}, "leaving": {}, "first_seen": {}, "start": 0}
+                pics, _, status = caffe["cup_cell"](state, 1, 5, caffe["LAYOUTS"][0], (2, 0))
+                self.assertEqual(pics["steam", 1][0][1], level)
+                self.assertEqual(caffe["is_working"](session), level > 0)
+                self.assertIn(f"{cpu}%", status)
+                self.assertIn(caffe["fmt_mem"](memory), status)
+        self.assertEqual(caffe["fmt_mem"](1536), "1.5G")
+        self.assertFalse(caffe["is_working"](("codex", "ttys001", 0, 0, 2048)))
+
+    def test_settled_latte_shows_resources_without_runtime_or_source_label(self):
         state = {
-            "live": {(40, "vscode"): ("vscode", "app:VS Code", 0, 0)},
+            "live": {(40, "vscode"): ("vscode", "app:VS Code", 0, 0, 64)},
             "leaving": {},
             "first_seen": {},
             "start": 0,
         }
         for layout in caffe["LAYOUTS"]:
             with self.subTest(layout=layout[0]):
-                _, _, status = caffe["cup_cell"](state, (40, "vscode"), 5, layout, (2, 0))
-                self.assertEqual(status, "")
+                _, label, status = caffe["cup_cell"](state, (40, "vscode"), 5, layout, (2, 0))
+                self.assertEqual(status, f"{caffe['DIM']}0% · 64M{caffe['RESET']}")
+                self.assertNotIn("app:", label)
 
     def test_app_identity_survives_pouring_closing_and_knocking(self):
         key = (100, "vscode")
         state = {
-            "live": {key: ("vscode", "app:VS Code", 0, 4)},
+            "live": {key: ("vscode", "app:VS Code", 0, 4, 64)},
             "leaving": {},
             "knocked": {},
             "first_seen": {key: 2},
@@ -42,11 +70,15 @@ class DrinkTests(unittest.TestCase):
             self.assertEqual(pics["mug", key][0][4][0], "latte")
             self.assertIn("VS Code", label)
             if now == 5:
-                self.assertEqual(status, "")
+                self.assertEqual(status, f"{caffe['DIM']}4% · 64M{caffe['RESET']}")
             for sprite, *_ in pics.values():
                 caffe["SPRITES"][sprite[0]](*sprite[1:])
         with (
-            patch.dict(caffe["update"].__globals__, scan_agents=lambda: {}),
+            patch.dict(
+                caffe["update"].__globals__,
+                scan_agents=lambda: {},
+                scan_copilot_sessions=lambda: {},
+            ),
             patch("time.time", return_value=6),
         ):
             caffe["update"](state)
@@ -76,7 +108,8 @@ class DrinkTests(unittest.TestCase):
             with (
                 patch.dict(
                     caffe["update"].__globals__,
-                    scan_agents=lambda source=source: {1: ("codex", source, 0, 0)},
+                    scan_agents=lambda source=source: {1: ("codex", source, 0, 0, 0)},
+                    scan_copilot_sessions=lambda: {},
                 ),
                 patch("time.time", return_value=6),
             ):
@@ -86,8 +119,8 @@ class DrinkTests(unittest.TestCase):
     def test_closing_an_app_is_not_a_served_cup(self):
         state = {
             "live": {
-                (40, "vscode"): ("vscode", "app:VS Code", 0, 0),
-                1: ("codex", "ttys001", 5, 0),
+                (40, "vscode"): ("vscode", "app:VS Code", 0, 0, 0),
+                1: ("codex", "ttys001", 5, 0, 0),
             },
             "leaving": {},
             "knocked": {},
@@ -100,7 +133,11 @@ class DrinkTests(unittest.TestCase):
             "cat": caffe["Cat"](0, caffe["HOME_X"]),
         }
         with (
-            patch.dict(caffe["update"].__globals__, scan_agents=lambda: {}),
+            patch.dict(
+                caffe["update"].__globals__,
+                scan_agents=lambda: {},
+                scan_copilot_sessions=lambda: {},
+            ),
             patch("time.time", return_value=100),
         ):
             caffe["update"](state)
@@ -111,7 +148,7 @@ class DrinkTests(unittest.TestCase):
     def test_pour_lands_at_each_drinks_rim(self):
         for source, drink in (("ttys001", "espresso"), ("app:Codex", "latte")):
             state = {
-                "live": {1: ("codex", source, 0, 0)},
+                "live": {1: ("codex", source, 0, 0, 0)},
                 "leaving": {},
                 "first_seen": {1: 2},
                 "start": 0,
