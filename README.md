@@ -6,7 +6,7 @@ cup for every AI coding agent you have running.
 ![caffe in action](caffe.gif)
 
 - **Keeps the Mac awake** until you quit (`caffeinate -dimsu` under the hood).
-- **Battery aware.** Unplugged and below 20%, the display may sleep while the
+- **Battery aware.** Unplugged at 20% or less, the display may sleep while the
   system stays awake, so your agents keep running. Plug in and the display
   stays on again. The header shows the charge while you're on battery.
 - **Espressos for CLI sessions.** Copilot CLI, Codex CLI, Claude Code and Pi
@@ -34,18 +34,19 @@ cup for every AI coding agent you have running.
   chase. A slow mouse gets caught (and let go); a fast one escapes. A napping
   cat sleeps right through it. Mice come out more at night.
 - **Visiting cats.** A stray wanders in every so often. A cat that's been
-  petted or fed lately shares the counter for a while; a grumpy one hisses it
-  out.
+  petted or fed lately shares the counter for a while; a grumpy one usually
+  hisses it out.
 - **Time of day.** Mornings open with a greeting. From 23:00 the cat takes the
   night shift: it walks slower, naps more and gets its own quips. At 14:30
-  there's fika: a kanelbulle on the counter, or a lussekatt in December, and
-  the cat sneaks a bite now and then until it's gone.
+  there's fika: a kanelbulle on the counter, or a lussekatt in December. While
+  agents work, the cat sneaks a bite now and then.
 - **Rush hour.** With four or more agents working at once, the cat hurries.
 - **Lots of agents?** Cups shrink to fit the screen. Anything that still
   doesn't fit is counted below the counter.
 - **Receipt on quit:** an order number, your espressos per agent, the cups the
   cat broke, the mice it caught, time awake against total agent time, the
-  longest session, visiting cats, and the cat's tip in pets and treats. Open apps and Copilot activity-only mugs don't count.
+  longest session, visiting cats, and the cat's tip in pets and treats. Open
+  apps and Copilot activity-only mugs don't count.
 
 ## Install
 
@@ -69,8 +70,8 @@ pictures.
 caffe
 ```
 
-Press `p` to pet the cat, `f` to feed it, and `q` or `Ctrl-C` to close the bar. `caffe --help`
-prints a short summary.
+Press `p` to pet the cat, `f` to feed it, and `q` or `Ctrl-C` to close the bar.
+`caffe --help` prints a short summary.
 
 To update to the latest version:
 

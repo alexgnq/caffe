@@ -54,12 +54,14 @@ class BatteryTests(unittest.TestCase):
 
     def test_low_battery_lets_the_display_sleep_until_plugged_in(self):
         state, caf, started = bar(), Mock(), []
+        first = caf
         fake_start = lambda saver=False: started.append(saver) or Mock()  # noqa: E731
         for battery, saver in (((True, 50), False), ((True, 19), True), ((False, 19), False)):
             with patch.dict(GLOBALS, read_battery=lambda b=battery: b, start_caffeinate=fake_start):
                 caf = caffe["check_power"](state, caf)
             self.assertEqual(state.get("saver", False), saver)
         self.assertEqual(started, [True, False])
+        first.terminate.assert_called_once()  # or -dimsu would keep the display on
         self.assertIn("Plugged in", state["toast"][0])
         self.assertIn("battery 19%", caffe["header"]({**state, "battery": (True, 19)}, 0, 120))
 
@@ -112,7 +114,6 @@ class MischiefTests(unittest.TestCase):
 
     def test_fast_mouse_escapes(self):
         state = bar()
-        state["cat"].x = 60.0
         play(state, 0, 0.5)
         state["due"] = {"mouse"}
         with patch("random.uniform", side_effect=lambda a, b: b):
@@ -122,10 +123,17 @@ class MischiefTests(unittest.TestCase):
         self.assertIn("got away", state["toast"][0])
 
     def test_sleeping_cat_ignores_mice(self):
-        state = bar(due={"mouse"}, live={})
-        play(state, 1, 1.2, pids=())
+        state = bar(due={"mouse"})
+        state["cat"].mode = "nap"
+        play(state, 1, 1.2)
         self.assertIn("sleeps right through it", state["toast"][0])
         self.assertFalse(state["cat"].chasing)
+
+    def test_mice_come_out_on_an_empty_bar_after_the_last_cup_is_knocked(self):
+        state = bar(due={"mouse"}, live={})
+        state["cat"].target = 1  # the cup it swatted, now gone
+        play(state, 1, 1.2, pids=())
+        self.assertIn("mouse", state)
 
     def test_treats_are_limited(self):
         cat = caffe["Cat"](0, caffe["HOME_X"])
@@ -152,10 +160,31 @@ class GuestTests(unittest.TestCase):
         self.assertEqual(state["visitors"], 1)
 
     def test_grumpy_cat_hisses_the_stray_out(self):
-        state = bar(due={"guest"})
-        self.assertIsNone(self.visit(state, 0.7))
+        state, now = bar(due={"guest"}), 1.0
+        with patch("random.random", return_value=0.7):
+            while state.get("guest", {}).get("phase") != "leave" and now < 20:
+                play(state, now, now + 0.1)
+                now += 0.12
+        self.assertEqual(state["cat"].mode, "hiss")
         self.assertIn("bolts", state["toast"][0])
+        self.assertIsNone(self.visit(state, 0.7))
         self.assertEqual(state["visitors"], 1)
+
+    def test_a_stray_that_starts_close_stops_instead_of_walking_onto_the_cat(self):
+        state = bar()
+        state["cat"].pet(0.5)
+        guest = caffe["Cat"](0, 44, key="guest")
+        state["guest"] = {"cat": guest, "phase": "enter"}
+        with patch("random.random", return_value=0.7):
+            play(state, 1, 3)
+        self.assertEqual(state["guest"]["phase"], "stay")
+        self.assertEqual(guest.x, 44.0)
+
+    def test_a_shared_visit_is_not_a_pet(self):
+        state = bar(due={"guest"})
+        state["cat"].pet(0)
+        self.visit(state, 0.7)
+        self.assertFalse(state["cat"].pampered(603))  # 10 min after the pet, not the visit
 
 
 class ReceiptTests(unittest.TestCase):
@@ -166,7 +195,7 @@ class ReceiptTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             caffe["receipt"](state, 60)
-        for line in ("Mice caught by", "Visiting cats", "Treats"):
+        for line in ("Mice caught by", "Visiting cats", "Tip for", "1 treat"):
             self.assertIn(line, out.getvalue())
 
 

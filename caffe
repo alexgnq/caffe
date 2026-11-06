@@ -8,7 +8,7 @@ leaves the counter. A barista cat wanders behind the cups, checks on new and
 finished ones, chases the odd mouse, and naps when the bar is quiet. Stray
 cats drop by now and then, and at 14:30 there's fika.
 
-On battery below 20%, the display may sleep; agents keep running.
+On battery at 20% or less, the display may sleep; agents keep running.
 
 App lattes show total CPU and RAM. Running local Copilot app sessions and chats
 also get individual espressos labeled "Agent"; idle ones are hidden.
@@ -987,17 +987,22 @@ class Cat:
         """Not busy with a cup, a mouse, a treat or a pet."""
         return self.target is None and not self.chasing and self.mode not in BUSY_MODES
 
+    def do(self, mode, now, dur, *plan):
+        """Switch to `mode` for `dur` seconds, then follow the `plan`."""
+        self.mode, self.until, self.plan = mode, now + dur, list(plan)
+
     def slap(self, now):
-        self.mode, self.until, self.plan = "slap", now + 1.6, [("sit", 2.5)]
+        self.do("slap", now, 1.6, ("sit", 2.5))
 
     def hiss(self, now):
-        self.mode, self.until, self.plan = "hiss", now + 1.5, [("sit", 2)]
+        self.do("hiss", now, 1.5, ("sit", 2))
 
     def pet(self, now):
         """Stop whatever it's doing and purr for a bit."""
         self.pets += 1
         self.target, self.chasing = None, False  # it got distracted on its way to a cup
-        self.mode, self.until, self.plan, self.petted_at = "purr", now + 3, [("sit", 1.5)], now
+        self.petted_at = now
+        self.do("purr", now, 3, ("sit", 1.5))
 
     def feed(self, now):
         """Eat a treat, unless it's had plenty lately. Returns whether it ate."""
@@ -1005,7 +1010,7 @@ class Cat:
             return False
         self.fed.append(now)
         self.target, self.chasing = None, False
-        self.mode, self.until, self.plan = "eat", now + 2.4, [("sit", 1.5)]
+        self.do("eat", now, 2.4, ("sit", 1.5))
         return True
 
     def pampered(self, now):
@@ -1061,14 +1066,15 @@ class Cat:
     def pose(self, now):
         """The sprite pose for this moment, and whether to mirror it."""
         mirrored = self.dir < 0
+        chew = (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False)
         poses = {
             "walk": (("walk", int(now * 8) % 4), mirrored),
             "nap": (("nap", int(now / 1.2) % 2), mirrored),
             "groom": (("groom", 1 + int(now * 3) % 2), False),
             "yawn": (("yawn",), False),
             "purr": (("sit", int(now * 4) % 3, True), False),
-            "eat": (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False),
-            "nibble": (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False),
+            "eat": chew,
+            "nibble": chew,
             "hiss": (("hiss",), False),
             "slap": (
                 ("slap", 1 if self.until - now > 1.3 else (2 if self.until - now > 1 else 3)),
@@ -1212,6 +1218,7 @@ def render_idle(state, now, frame):
     if frame.gfx:
         top, art = len(frame.out), frame.art(6)
         frame.pics["idle"] = (("mug", SERVED_GLAZE, 0, 1.0), 2, top + 3, 2)
+        state["cat"].target = None  # its last cup is gone
         bar_life(state, now, frame, art, top=top, k=1.0, free_x=HOME_X, home=HOME_X)
         state["cat"].step(now, frame.width, calm=True, free_x=HOME_X, home=HOME_X)
         state["cat"].place(frame, art, top, 1.0, now)
@@ -1246,10 +1253,11 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
     if "mouse" in due and "guest" not in state and cat.free():
         due.discard("mouse")
         side = 1 if cat.x < lane / 2 else -1
-        x, speed = cat.x + side * random.uniform(6, 10), random.uniform(9, 13)
+        x, speed = cat.x + side * random.uniform(6, 10), random.uniform(10, 20)
         state["mouse"] = {"x": x, "dir": side, "speed": speed, "last": now}
-        cat.chasing = home is None
-        quip = "gives chase" if cat.chasing else "sleeps right through it"
+        cat.chasing = home is None and cat.mode != "nap"  # an empty bar's cat stays home
+        quip = "gives chase" if cat.chasing else "just watches"
+        quip = "sleeps right through it" if cat.mode == "nap" else quip
         state["toast"] = (f"A mouse! {cat.name} {quip}.", now + 3)
     if "mouse" in state:
         run_mouse(state, now, frame, (top + len(art) - 1, k), lane_ends)
@@ -1284,26 +1292,29 @@ def nibble(state, now, bun, spot):
     elif state.get("snack") and cat.mode != "walk":
         del state["snack"]
         if abs(cat.x - spot) < 1 and cat.free():  # it got there without being distracted
-            cat.mode, cat.until, cat.plan = "nibble", now + 2.4, [("sit", 1.5)]
+            cat.do("nibble", now, 2.4, ("sit", 1.5))
             state["bun_bites"] = bites = state.get("bun_bites", 0) + 1
             done = f"{cat.name} finished the {bun}." if bites >= BUN_BITES else ""
             state["toast"] = (done or f"{cat.name} takes a bite of the {bun}.", now + 3)
 
 
 def run_mouse(state, now, frame, spot, lane_ends):
-    """The mouse dashes for the end of the counter; a faster cat catches it."""
+    """The mouse dashes for the end of the counter. The cat runs at CHASE_SPEED,
+    so it catches slower mice; faster ones get away."""
     (row, k), cat, mouse = spot, state["cat"], state["mouse"]
     mouse["x"] += mouse["dir"] * mouse["speed"] * min(0.5, now - mouse["last"])
     mouse["last"] = now
     if cat.chasing and abs(cat.x - mouse["x"]) < 2.5:
         del state["mouse"]
         state["mice"] = state.get("mice", 0) + 1
-        cat.chasing, cat.mode, cat.until, cat.plan = False, "sit", now + 2, [("groom", 2.5)]
+        cat.chasing = False
+        cat.do("sit", now, 2, ("groom", 2.5))
         state["toast"] = (f"{cat.name} caught the mouse, then let it go.", now + 4)
     elif not lane_ends[0] <= mouse["x"] <= lane_ends[1]:
         del state["mouse"]
         if cat.chasing:
-            cat.chasing, cat.mode, cat.until, cat.plan = False, "sit", now + 1.5, [("yawn", 1.2)]
+            cat.chasing = False
+            cat.do("sit", now, 1.5, ("yawn", 1.2))
             state["toast"] = (f"The mouse got away. {cat.name} pretends not to care.", now + 4)
     else:
         if cat.chasing:
@@ -1320,22 +1331,23 @@ def run_guest(state, now, lane_ends):
     dt, guest.last = min(0.5, now - guest.last), now
     if visit["phase"] == "enter":
         guest.dir = 1 if cat.x > guest.x else -1
-        goal = cat.x - guest.dir * 9
-        if abs(goal - guest.x) > guest.speed * dt:
+        if abs(cat.x - guest.x) - 9 > guest.speed * dt:
             guest.x += guest.dir * guest.speed * dt
             return
         state["visitors"] = state.get("visitors", 0) + 1
         if random.random() < (0.8 if cat.pampered(now) else 0.4):
             visit.update(phase="stay", leave_at=now + random.uniform(20, 40))
-            guest.mode, guest.until, guest.petted_at = "purr", now + 3, now
+            guest.do("purr", now, 3)
             if cat.free():
-                cat.mode, cat.until, cat.plan, cat.petted_at = "purr", now + 3, [("sit", 6)], now
+                cat.do("purr", now, 3, ("sit", 6))  # purring, though not petted
             state["toast"] = (f"{guest.name} and {cat.name} share the counter. ♥", now + 4)
         else:
             visit["phase"], guest.mode, guest.speed, guest.dir = "leave", "walk", 18.0, -guest.dir
             if cat.free():
                 cat.hiss(now)
-            state["toast"] = (f"{cat.name} hisses. {guest.name} bolts!", now + 4)
+                state["toast"] = (f"{cat.name} hisses. {guest.name} bolts!", now + 4)
+            else:
+                state["toast"] = (f"{guest.name} thinks better of it.", now + 4)
     elif visit["phase"] == "stay":
         if guest.mode == "purr" and now >= guest.until:
             guest.mode = "sit"
@@ -1556,11 +1568,11 @@ def receipt(state, now):
     if state.get("visitors"):
         stats.append(("Visiting cats", str(state["visitors"])))
     sections = [items, stats]
-    tip = [(f"Tip for {cat.name}", f"{cat.pets} pet{'s' * (cat.pets > 1)} ♥")] if cat.pets else []
+    tips = [f"{cat.pets} pet{'s' * (cat.pets > 1)} ♥"] if cat.pets else []
     if cat.fed:
-        tip.append(("Treats", f"×{len(cat.fed)}"))
-    if tip:
-        sections.append(tip)
+        tips.append(f"{len(cat.fed)} treat{'s' * (len(cat.fed) > 1)}")
+    if tips:  # one tip line, with the treats below the pets
+        sections.append([(f"Tip for {cat.name}", tips[0]), *(("", t) for t in tips[1:])])
     order = f"Order #{state['order']:04d}"
     rule = f"  {'-' * w}"
     out = ["", rule, f"  {'CAFFE RECEIPT':^{w}}"]
@@ -1740,11 +1752,11 @@ def main():
         last_poll, last_power, shown = 0.0, 0.0, []
         while True:
             now = time.time()
-            if now - last_power >= BATTERY_POLL_S:
-                caf, last_power = check_power(state, caf), now
             if now - last_poll >= POLL_S:
                 update(state)
                 last_poll = now
+            if now - last_power >= BATTERY_POLL_S:  # after update, so its toast stays up
+                caf, last_power = check_power(state, caf), now
             if resized[0]:
                 resized[0], shown = False, []
                 sys.stdout.write((gallery.reset() if state["gfx"] else "") + "\033[2J")
