@@ -102,8 +102,13 @@ DAY_QUIPS = {
 GREETINGS = {
     "morning": "Good morning! {} opens the bar.",
     "night": "{} takes the night shift.",
-    "fika": "{} is on shift. Fika's out!",
+    "fika": "{} is on shift, with a fresh {bun} on the counter.",
 }
+
+
+def fika_bun(t):
+    """A kanelbulle, or a saffron lussekatt in December."""
+    return "lussekatt" if time.localtime(t).tm_mon == 12 else "kanelbulle"
 
 
 def daypart(t):
@@ -1262,7 +1267,7 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
             state["guest"]["cat"].place(frame, art, top, k, now)
     bites = state.get("bun_bites", 0)
     if daypart(now) == "fika" and free_x <= lane - 8 and bites < BUN_BITES:
-        bun = "lussekatt" if time.localtime(now).tm_mon == 12 else "kanelbulle"
+        bun = fika_bun(now)
         if home is None:
             nibble(state, now, bun, lane_ends[1])
         frame.pics["bun"] = (("bun", bun, bites), lane - 8, top + len(art) - 1, 2)
@@ -1506,7 +1511,7 @@ def bar_clock(state, now):
     """Time of day: fika, a sleepier cat at night, and the odd mouse or stray."""
     cat, part = state["cat"], daypart(now)
     if part == "fika" and state.get("daypart") not in (None, "fika"):
-        bun = "lussekatt" if time.localtime(now).tm_mon == 12 else "kanelbulle"
+        bun = fika_bun(now)
         state["toast"] = (f"Fika! {cat.name} sets out a {bun}.", now + 6)
         state["bun_bites"] = 0
     state["daypart"] = part
@@ -1707,7 +1712,9 @@ def main():
         "longest": (0, ""),
         "cat": cat,
         "toast": (
-            GREETINGS.get(daypart(time.time()), "{} is on shift today.").format(cat.title),
+            GREETINGS.get(daypart(time.time()), "{} is on shift today.").format(
+                cat.title, bun=fika_bun(time.time())
+            ),
             time.time() + 6,
         ),
         "initialized": False,
