@@ -7,14 +7,18 @@ Busy agents steam harder. When a session ends, its cup drains and
 leaves the counter. A barista cat wanders behind the cups, checks on new and
 finished ones, and naps when the bar is quiet.
 
+App lattes show total CPU and RAM. Running local Copilot app sessions and chats
+also get individual espressos labeled "Agent"; idle ones are hidden.
+
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
 kitty, WezTerm or a recent iTerm2. Other terminals get the bar without pictures.
 Press q (or Ctrl-C) to close the bar and get your receipt.
 
-`caffe update` installs the latest version over this one.
+`caffe update` installs upstream over this copy, replacing local customizations.
 """
 
 import base64
+import datetime
 import math
 import os
 import random
@@ -22,12 +26,15 @@ import re
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import termios
 import time
 import tty
 import zlib
+from contextlib import closing
+from pathlib import Path
 
 
 def c256(n):
@@ -42,12 +49,15 @@ AGENTS = {
     "pi": ("Pi", c256(114), (110, 196, 120)),
 }
 DRINKS = {**AGENTS, "vscode": ("VS Code", c256(44), (40, 190, 210))}
+COPILOT_SESSION_KIND = "copilot-session"
+COPILOT_SESSION_DB = Path.home() / ".copilot" / "data.db"
 SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
 GOLD, WOOD = c256(220), c256(94)
 POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S = 3.0, 0.12, 0.5, 2.0
 DRAIN_S, SERVED_S = 3.0, 15.0  # finished cups the cat can't reach leave on their own
 BUSY_CPU, WORKING_CPU = 25.0, 3.0
+BUSY_RAM_MB, WORKING_RAM_MB = 1024.0, 256.0
 RUSH_AT = 4  # agents working at once
 
 QUIPS = [
@@ -100,18 +110,67 @@ def ui_host(pid, processes, names):
     host, seen = None, set()
     while pid in processes and pid not in seen:
         seen.add(pid)
-        match = re.search(r"/([^/]+)\.app/Contents/", names.get(pid, ""))
+        match = re.search(r"/([^/]+)\.app/Contents/MacOS/[^/]+$", names.get(pid, ""))
         if match and match[1] in UI_APPS:
             host = pid, UI_APPS[match[1]]
         pid = int(processes[pid][1])
     return host
 
 
+def parse_session_timestamp(value):
+    """Convert the session database's ISO timestamp to an epoch value."""
+    try:
+        timestamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.astimezone()
+        return timestamp.timestamp()
+    except (OverflowError, OSError, TypeError, ValueError):
+        return time.time()
+
+
+def scan_copilot_sessions():
+    """Read running local Copilot session metadata, never conversation history."""
+    try:
+        uri = COPILOT_SESSION_DB.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            rows = connection.execute(
+                """
+                SELECT id, title, created_at
+                FROM sessions
+                WHERE execution_location = 'local'
+                  AND session_type IN ('project', 'agent', 'general_chat')
+                  AND is_running = 1
+                  AND archived_at IS NULL
+                ORDER BY created_at
+                """
+            )
+            sessions = {}
+            for raw_id, raw_title, created_at in rows:
+                session_id = str(raw_id)
+                title = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+                title = re.sub(r"[\x00-\x1f\x7f]", "", title)
+                if not title:
+                    title = f"Session {session_id[:8]}"
+                key = f"{COPILOT_SESSION_KIND}:{session_id}"
+                sessions[key] = (
+                    COPILOT_SESSION_KIND,
+                    title,
+                    parse_session_timestamp(created_at),
+                    0.0,
+                    0.0,
+                )
+            return sessions
+    except (OSError, sqlite3.Error):
+        # The app's metadata index is optional and its schema is undocumented.
+        return None
+
+
 def scan_agents():
     """CLI sessions by PID, and UI applications by (application PID, app kind)."""
     try:
         out = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,ppid=,tty=,%cpu=,etime=,args="],
+            ["/bin/ps", "-axo", "pid=,ppid=,tty=,%cpu=,rss=,etime=,args="],
             check=True,
             capture_output=True,
             text=True,
@@ -138,8 +197,8 @@ def agent_sessions(out, commands, now):
     }
     processes = {
         int(cols[0]): cols
-        for cols in (line.split(None, 5) for line in out.splitlines())
-        if len(cols) == 6
+        for cols in (line.split(None, 6) for line in out.splitlines())
+        if len(cols) == 7
     }
     found, apps = {}, {}
     # UI cups belong to applications, regardless of their underlying agents.
@@ -147,43 +206,66 @@ def agent_sessions(out, commands, now):
         match = re.search(r"/([^/]+)\.app/Contents/MacOS/[^/]+$", names.get(pid, ""))
         if match and match[1] in UI_APPS:
             kind = UI_APPS[match[1]]
-            apps[pid, kind] = [kind, f"app:{DRINKS[kind][0]}", now - parse_etime(cols[4]), 0]
+            apps[pid, kind] = [kind, f"app:{DRINKS[kind][0]}", now - parse_etime(cols[5]), 0, 0]
     for pid, cols in processes.items():
-        kind = agent_kind(cols[5]) or agent_kind(names.get(pid, ""))
-        if os.path.basename(names.get(pid, "")) == "copilot-runtime":
-            kind = "copilot"
-        if not kind:
-            continue
         try:
             cpu = float(cols[3].replace(",", "."))
         except ValueError:
             cpu = 0.0
+        ram_mb = int(cols[4]) / 1024
         host = ui_host(pid, processes, names)
-        # CLI sessions in VS Code's terminal still get individual espressos.
-        if cols[2] != "??" and (not host or host[1] == "vscode"):
-            found[pid] = [kind, int(cols[1]), cols[2], now - parse_etime(cols[4]), cpu]
-        elif host:
+        if host:
             owner, kind = host
             key = owner, kind
             if key not in apps:
                 apps[key] = [
                     kind,
                     f"app:{DRINKS[kind][0]}",
-                    now - parse_etime(processes[owner][4]),
+                    now - parse_etime(processes[owner][5]),
+                    0,
                     0,
                 ]
             apps[key][3] += cpu
+            apps[key][4] += ram_mb
+        kind = agent_kind(cols[6]) or agent_kind(names.get(pid, ""))
+        if os.path.basename(names.get(pid, "")) == "copilot-runtime":
+            kind = "copilot"
+        # CLI sessions in VS Code's terminal still get individual espressos.
+        if kind and cols[2] != "??" and (not host or host[1] == "vscode"):
+            found[pid] = [kind, int(cols[1]), cols[2], now - parse_etime(cols[5]), cpu, ram_mb]
     # Fold helper processes whose parent is itself an agent session into that session.
-    for _kind, ppid, _tty, _started, cpu in list(found.values()):
+    for _kind, ppid, _tty, _started, cpu, ram_mb in list(found.values()):
         if ppid in found:
             found[ppid][4] += cpu
+            found[ppid][5] += ram_mb
     sessions = {
-        pid: (kind, tty_name, started, cpu)
-        for pid, (kind, ppid, tty_name, started, cpu) in found.items()
+        pid: (kind, tty_name, started, cpu, ram_mb)
+        for pid, (kind, ppid, tty_name, started, cpu, ram_mb) in found.items()
         if ppid not in found
     }
     sessions.update((key, tuple(value)) for key, value in apps.items())
     return sessions
+
+
+def fmt_mem(mb):
+    """Format resident memory in compact MiB/GiB units."""
+    return f"{mb / 1024:.1f}G" if mb >= 1024 else f"{mb:.0f}M"
+
+
+def app_steam_level(cpu, ram_mb):
+    """Map app CPU and resident memory use to the three steam levels."""
+    if cpu >= BUSY_CPU or ram_mb >= BUSY_RAM_MB:
+        return 2
+    if cpu >= WORKING_CPU or ram_mb >= WORKING_RAM_MB:
+        return 1
+    return 0
+
+
+def is_working(session):
+    kind, source, _, cpu, ram_mb = session
+    if kind == COPILOT_SESSION_KIND:
+        return True
+    return bool(app_steam_level(cpu, ram_mb)) if source.startswith("app:") else cpu >= WORKING_CPU
 
 
 def fmt_dur(sec):
@@ -895,6 +977,28 @@ def pick_layout(count, width, rows, gfx):
     return layout, per_row
 
 
+def cup_activity(session, now):
+    """Steam level and status for a settled drink."""
+    kind, source, started, cpu, ram_mb = session
+    if kind == COPILOT_SESSION_KIND:
+        return 1, f"{DIM}working{RESET}"
+    if source.startswith("app:"):
+        return app_steam_level(cpu, ram_mb), f"{DIM}{cpu:.0f}% · {fmt_mem(ram_mb)}{RESET}"
+    level = 2 if cpu >= BUSY_CPU else (1 if cpu >= WORKING_CPU else 0)
+    return level, f"{DIM}{fmt_dur(now - started)}{RESET}"
+
+
+def cup_label(kind, source, k):
+    style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
+    name, color, _ = DRINKS[style_kind]
+    if kind == COPILOT_SESSION_KIND:
+        name = "Agent"
+    label = f"{color}{name}{RESET}"
+    if k == 1 and not source.startswith("app:") and kind != COPILOT_SESSION_KIND:
+        label += f" {DIM}{source.replace('ttys', 's')}{RESET}"
+    return label
+
+
 def cup_cell(state, pid, now, layout, spot):
     """Pictures and two label lines for one cup on the counter at (col, top)."""
     _, _, art_h, k, steam_rows = layout
@@ -904,9 +1008,12 @@ def cup_cell(state, pid, now, layout, spot):
     leaving = pid in state["leaving"]
     session = state["leaving"][pid] if leaving else state["live"][pid]
     kind, tty_name = session[:2]
-    drink = "latte" if tty_name.startswith("app:") else "espresso"
+    drink = "latte" if kind != COPILOT_SESSION_KIND and tty_name.startswith("app:") else "espresso"
     over = mug_row + DRINK_RIMS[drink] // CH + 1 - steam_rows
-    seed = pid if isinstance(pid, int) else pid[0] + sum(map(ord, pid[1]))
+    if isinstance(pid, str):
+        seed = zlib.crc32(pid.encode())
+    else:
+        seed = pid if isinstance(pid, int) else pid[0] + sum(map(ord, pid[1]))
     style = drink, seed % 3
     if leaving:
         ended = session[2]
@@ -920,30 +1027,28 @@ def cup_cell(state, pid, now, layout, spot):
             pics[("mug", pid)] = (knock, col - round(4 * k), mug_row - up, 2)
         status = f"{GOLD}✔ served{RESET}" if k == 1 else f"{GOLD}✔{RESET}"
     else:
-        started, cpu = session[2:]
-        glaze = DRINKS[kind][2]
+        style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
+        glaze = DRINKS[style_kind][2]
         seen = state["first_seen"].get(pid, 0)
         # Sessions already running at startup are served full; new ones pour in.
         poured = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
+        if kind == COPILOT_SESSION_KIND:
+            poured = 1.0
+        level, status = cup_activity(session, now)
         if poured < 1:
             pics[("mug", pid)] = (("mug", glaze, int(poured * 2), k, style, 4), col, mug_row, 2)
             if steam_rows:
                 pics[("pour", pid)] = (("pour", int(now * 10) % 4, steam_rows, drink), col, over, 3)
-            status = f"{GOLD}pouring…{RESET}"
+            if drink != "latte":
+                status = f"{GOLD}pouring…{RESET}"
         else:
             settled = now - seen - POUR_S
             wobble = min(4, max(0, int(settled / 0.12))) if seen > state["start"] + 1 else 4
             pics[("mug", pid)] = (("mug", glaze, 2, k, style, wobble), col, mug_row, 2)
             if steam_rows:
-                level = 2 if cpu >= BUSY_CPU else (1 if cpu >= WORKING_CPU else 0)
                 frame = (int(now / 0.12) + seed) % STEAM_FRAMES
                 pics[("steam", pid)] = (("steam", level, frame, steam_rows, drink), col, over, 3)
-            status = f"{DIM}{fmt_dur(now - started)}{RESET}" if drink == "espresso" else ""
-    name, color, _ = DRINKS[kind]
-    label = f"{color}{name}{RESET}"
-    if k == 1 and drink == "espresso":
-        label += f" {DIM}{tty_name.replace('ttys', 's')}{RESET}"
-    return pics, label, status
+    return pics, cup_label(kind, tty_name, k), status
 
 
 class Frame:
@@ -1007,7 +1112,7 @@ def gone(state, pid, now):
 def render_cups(state, now, pids, frame, room_rows):
     """Rows of cups on counters, with the cat behind the last row."""
     cat = state["cat"]
-    calm = all(cpu < WORKING_CPU for *_, cpu in state["live"].values())
+    calm = not any(is_working(session) for session in state["live"].values())
     layout, per_row = pick_layout(len(pids), frame.width, room_rows, frame.gfx)
     _, cell, art_h, k, _ = layout
     # Even mini cups can run out of room: show what fits and count the rest.
@@ -1067,7 +1172,7 @@ def render(state, now):
     frame = Frame(min(cols, 96), state["gfx"])
     frame.out = [header(state, now, frame.width), DIM + "─" * frame.width + RESET]
     # Cups keep their place on the counter, oldest session first.
-    started = {p: s for p, (_, _, s, _) in state["live"].items()}
+    started = {p: session[2] for p, session in state["live"].items()}
     started.update((p, c[3]) for p, c in state["leaving"].items() if not gone(state, p, now))
     pids = sorted(started, key=started.get)
     if pids:
@@ -1098,15 +1203,32 @@ def update(state):
     live = scan_agents()
     if live is None:
         return
+    sessions = scan_copilot_sessions()
+    if sessions is None:
+        sessions = {
+            pid: record
+            for pid, record in state["live"].items()
+            if record[0] == COPILOT_SESSION_KIND
+        }
+    live.update(sessions)
     for pid in live.keys() - state["live"].keys():
         state["first_seen"][pid] = now
         if state["initialized"]:
             state["visit"] = pid
             kind, source = live[pid][:2]
-            where = "" if source.startswith("app:") else f" on {source}"
-            state["toast"] = (f"New order: {DRINKS[kind][0]}{where} ☕", now + 4)
+            if kind == COPILOT_SESSION_KIND:
+                message = f"New session: {source} ☕"
+            else:
+                where = "" if source.startswith("app:") else f" on {source}"
+                message = f"New order: {DRINKS[kind][0]}{where} ☕"
+            state["toast"] = (message, now + 4)
     for pid in state["live"].keys() - live.keys():
-        kind, tty_name, started, _ = state["live"][pid]
+        kind, tty_name, started, _, _ = state["live"][pid]
+        if kind == COPILOT_SESSION_KIND:
+            state["first_seen"].pop(pid, None)
+            if state["cat"].target == pid:
+                state["cat"].target = None
+            continue
         dur = now - started
         state["leaving"][pid] = (kind, tty_name, now, started)
         state["visit"] = pid
@@ -1121,7 +1243,7 @@ def update(state):
     state["live"] = live
     state["initialized"] = True
     # Rush hour: lots of agents working at once. The cat hurries.
-    working = sum(cpu >= WORKING_CPU for *_, cpu in live.values())
+    working = sum(is_working(session) for session in live.values())
     if working >= RUSH_AT and not state["rush"]:
         state["toast"] = (f"Rush hour! {working} agents brewing at once.", now + 5)
     state["rush"] = working >= RUSH_AT
@@ -1132,8 +1254,12 @@ def receipt(state, now):
     """The bill printed on quit: what was served, what broke, and the tip."""
     w, cat = 34, state["cat"]
     awake = now - state["start"]
-    brewing = [s for s in state["live"].values() if not s[1].startswith("app:")]
-    agent_time = state["agent_time"] + sum(now - started for _, _, started, _ in brewing)
+    brewing = [
+        s
+        for s in state["live"].values()
+        if s[0] != COPILOT_SESSION_KIND and not s[1].startswith("app:")
+    ]
+    agent_time = state["agent_time"] + sum(now - session[2] for session in brewing)
     orders = sorted(state["orders"].items(), key=lambda order: -order[1])
     items = [(f"Espresso · {name}", f"×{n}") for name, n in orders] or [("Cups served", "0")]
     if state["broken"]:

@@ -35,7 +35,7 @@ class CatCleanupTests(unittest.TestCase):
         cat.pet(0)
         state = {
             "cat": cat,
-            "live": {99: ("codex", "ttys099", 0, 0)},
+            "live": {99: ("codex", "ttys099", 0, 0, 0)},
             "first_seen": {},
             "start": 0,
             "leaving": {pid: ("codex", "ttys001", 0, -pid) for pid in range(1, 13)},
@@ -73,7 +73,7 @@ class CatCleanupTests(unittest.TestCase):
         self.assertTrue(caffe["gone"](state, 1, 100 + caffe["KNOCK_S"] + 0.01))
 
     def test_finished_cup_hidden_behind_live_cups_leaves_on_its_own(self):
-        live = {pid: ("codex", f"ttys{pid:03}", pid, 0) for pid in range(1, 41)}
+        live = {pid: ("codex", f"ttys{pid:03}", pid, 0, 0) for pid in range(1, 41)}
         state = {
             "cat": caffe["Cat"](0, caffe["HOME_X"]),
             "live": live,

@@ -36,8 +36,8 @@ class ReceiptTests(unittest.TestCase):
     def test_busy_bar_itemizes_orders_breakage_agent_time_and_tip(self):
         state = bar(
             live={
-                7: ("claude", "ttys007", 3000, 0),
-                (40, "vscode"): ("vscode", "app:VS Code", 0, 0),
+                7: ("claude", "ttys007", 3000, 0, 0),
+                (40, "vscode"): ("vscode", "app:VS Code", 0, 0, 0),
             },
             orders={"Claude": 1, "Codex": 3},
             agent_time=4800.0,
