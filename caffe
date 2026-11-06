@@ -5,14 +5,18 @@ Every interactive Copilot CLI / Codex CLI / Claude Code / Pi session gets an
 espresso. Each supported desktop application gets a latte named after the app.
 Busy agents steam harder. When a session ends, its cup drains and
 leaves the counter. A barista cat wanders behind the cups, checks on new and
-finished ones, and naps when the bar is quiet.
+finished ones, chases the odd mouse, and naps when the bar is quiet. Stray
+cats drop by now and then, and at 14:30 there's fika.
+
+On battery below 20%, the display may sleep; agents keep running.
 
 App lattes show total CPU and RAM. Running local Copilot app sessions and chats
 also get individual espressos labeled "Agent"; idle ones are hidden.
 
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
 kitty, WezTerm or a recent iTerm2. Other terminals get the bar without pictures.
-Press q (or Ctrl-C) to close the bar and get your receipt.
+Press p to pet the cat, f to feed it a treat, and q (or Ctrl-C) to close the bar
+and get your receipt.
 
 `caffe update` installs upstream over this copy, replacing local customizations.
 """
@@ -59,6 +63,10 @@ DRAIN_S, SERVED_S = 3.0, 15.0  # finished cups the cat can't reach leave on thei
 BUSY_CPU, WORKING_CPU = 25.0, 3.0
 BUSY_RAM_MB, WORKING_RAM_MB = 1024.0, 256.0
 RUSH_AT = 4  # agents working at once
+LOW_BATTERY, BATTERY_POLL_S = 20, 30.0  # % at which the display may sleep
+MOUSE_ODDS, GUEST_ODDS = 1 / 100, 1 / 300  # per poll: a mouse every ~5 min, a guest every ~15
+CHASE_SPEED, TREATS_PER_10_MIN = 15.0, 3
+BUSY_MODES = ("purr", "slap", "eat", "hiss")  # the cat finishes these before anything else
 
 QUIPS = [
     "Brewing tokens, one sip at a time.",
@@ -77,6 +85,35 @@ IDLE_QUIPS = [
     "Quiet bar. Start an agent and I'll pour.",
     "Counter's clean. Mac's still awake, as you asked.",
 ]
+DAY_QUIPS = {
+    "night": [
+        "Burning the midnight oil?",
+        "Night shift. The cat runs the place now.",
+        "Your agents don't sleep. Neither does this bar.",
+        "Last call was hours ago.",
+    ],
+    "fika": [
+        "Fika! Agents work, humans have a bun.",
+        "Kaffe och kanelbulle. Obligatoriskt.",
+        "Commit, push, fika.",
+    ],
+}
+GREETINGS = {
+    "morning": "Good morning! {} opens the bar.",
+    "night": "{} takes the night shift.",
+    "fika": "{} is on shift. Fika's out!",
+}
+
+
+def daypart(t):
+    """night (23–05), morning (05–10), fika (14:30–15:00) or day, in local time."""
+    lt = time.localtime(t)
+    minute = lt.tm_hour * 60 + lt.tm_min
+    if lt.tm_hour < 5 or lt.tm_hour >= 23:
+        return "night"
+    if lt.tm_hour < 10:
+        return "morning"
+    return "fika" if 14 * 60 + 30 <= minute < 15 * 60 else "day"
 
 
 def parse_etime(s):
@@ -707,6 +744,7 @@ CAT_POSES = {
     "groom": lambda paw: cat_sit(groom=paw),
     "slap": lambda stage: cat_sit(slap=stage),
     "yawn": lambda: cat_sit(yawn=True),
+    "hiss": lambda: {**cat_sit(), "mouth": ellipse(28, 28, 2.1, 2.5)},  # a yawn, eyes wide open
     "walk": cat_walk,
     "nap": cat_nap,
 }
@@ -785,7 +823,65 @@ def hearts_sprite(frame):
     return img
 
 
+def ground_img(cols, k):
+    """A one-row sprite whose shapes stand on the counter at any zoom."""
+    img = Img(math.ceil(cols * k), 1, k)
+    img.move(0, (0, 0), (0, CH / k - CH))
+    return img
+
+
+def mouse_sprite(step, flip, k):
+    """A little grey mouse, scurrying right."""
+    img, fur = ground_img(3, k), (150, 140, 136)
+    img.fill(path(((5, 12), (2, 10), (1, 13.5)), 0.5), PINK)
+    for x in (8, 15) if step else (10, 13):
+        img.fill(ellipse(x, 14.8, 1.6, 0.9), mix(fur, INK, 0.3))
+    img.fill(ellipse(11.5, 11, 6.5, 4), fur)
+    img.fill(ellipse(18, 11, 3.8, 3), fur)
+    img.fill(circle(16.8, 7.8, 2.1), fur)
+    img.fill(circle(16.8, 7.8, 1.2), PINK)
+    img.fill(circle(21.6, 11.6, 0.8), PINK)
+    img.fill(circle(19.2, 10.2, 0.7), INK)
+    return img.mirror() if flip else img
+
+
+def treat_sprite(bites, k):
+    """A fish-shaped treat, eaten head first by the cat on its right."""
+    img = ground_img(2, k)
+    fish = union(ellipse(9, 12.6, 4.6, 2.4), poly((5, 12.6), (1.5, 10), (1.5, 15.2)))
+    eaten = rbox(0, 0, 14.5 - bites * 3.5, 16, 0)
+    img.fill(clip(fish, eaten), (214, 160, 96))
+    if bites == 0:
+        img.fill(circle(11.8, 12, 0.5), INK)
+    return img
+
+
+def bun_sprite(kind):
+    """Fika: a kanelbulle, or a saffron lussekatt in December."""
+    img = Img(3, 1)
+    img.fill(ellipse(12, 15.2, 10, 1), INK, 0.3)
+    if kind == "lussekatt":
+        # An S: a strand coiled one way at the left end, and the other way at the right.
+        coil = [(a * 0.6 * math.cos(a), a * 0.45 * math.sin(a)) for a in (i / 3 for i in range(19))]
+        strand = [(7 + x, 11 + y) for x, y in coil] + [(17 - x, 11 - y) for x, y in coil[::-1]]
+        img.fill(path(strand, 2.6), (196, 128, 36))
+        img.fill(path(strand, 1.9), (240, 182, 62))
+        for x in (7, 17):
+            img.fill(circle(x, 11, 1.1), (70, 30, 30))
+        return img
+    img.fill(ellipse(12, 12, 10, 3.6), (176, 108, 52))
+    img.fill(ellipse(12, 10.2, 8.5, 4), (210, 140, 70))
+    spiral = [(12 + a * 0.75 * math.cos(a), 10.4 + a * 0.32 * math.sin(a)) for a in range(1, 11)]
+    img.fill(path(spiral, 0.55), (132, 76, 38))
+    for x, y in ((7, 8.5), (10, 7), (15, 7.5), (17.5, 10), (9.5, 11.5), (14, 12)):
+        img.fill(circle(x, y, 0.7), WHITE)
+    return img
+
+
 SPRITES = {
+    "mouse": mouse_sprite,
+    "treat": treat_sprite,
+    "bun": bun_sprite,
     "hearts": hearts_sprite,
     "knock": knock_sprite,
     "mug": mug_sprite,
@@ -856,38 +952,60 @@ class Cat:
 
     MIN_X = 4  # how close its middle gets to the edges
 
-    def __init__(self, now, home):
+    def __init__(self, now, home, key="cat"):
+        self.key = key  # its pictures' names, so a visiting cat can share the bar
         self.coat = random.randrange(len(COATS))
         self.name = random.choice(CAT_NAMES)
         self.x = self.goal = float(home)
         self.dir, self.last, self.speed = 1, now, 7.0  # cols/s
         self.plan, self.mode, self.until = [], "nap", now + 4
         self.pets, self.petted_at, self.target = 0, 0.0, None
+        self.fed, self.chasing, self.sleepy = [], False, False
 
     @property
     def title(self):
         return f"{self.name} the {COATS[self.coat][0]} cat"
 
     def go(self, x):
-        self.goal, self.mode, self.plan = float(x), "walk", []
+        self.goal, self.mode, self.plan, self.chasing = float(x), "walk", [], False
 
     def moving(self):
-        return self.mode in ("walk", "purr", "slap")
+        return self.mode in ("walk", "purr", "slap", "eat", "hiss")
+
+    def free(self):
+        """Not busy with a cup, a mouse, a treat or a pet."""
+        return self.target is None and not self.chasing and self.mode not in BUSY_MODES
 
     def slap(self, now):
         self.mode, self.until, self.plan = "slap", now + 1.6, [("sit", 2.5)]
 
+    def hiss(self, now):
+        self.mode, self.until, self.plan = "hiss", now + 1.5, [("sit", 2)]
+
     def pet(self, now):
         """Stop whatever it's doing and purr for a bit."""
         self.pets += 1
-        self.target = None  # it got distracted on its way to a cup
+        self.target, self.chasing = None, False  # it got distracted on its way to a cup
         self.mode, self.until, self.plan, self.petted_at = "purr", now + 3, [("sit", 1.5)], now
+
+    def feed(self, now):
+        """Eat a treat, unless it's had plenty lately. Returns whether it ate."""
+        if sum(now - t < 600 for t in self.fed) >= TREATS_PER_10_MIN:
+            return False
+        self.fed.append(now)
+        self.target, self.chasing = None, False
+        self.mode, self.until, self.plan = "eat", now + 2.4, [("sit", 1.5)]
+        return True
+
+    def pampered(self, now):
+        """Petted or fed in the last 10 minutes: in a good mood."""
+        return bool(self.pets or self.fed) and now - max([self.petted_at, *self.fed]) < 600
 
     def _arrive(self, now, calm, free_x, home):
         u = random.uniform
         if home is not None:
             self.plan = [("nap", u(20, 40)), ("sit", 1.5), ("groom", u(2, 4))]
-        elif calm and self.x >= free_x and random.random() < 0.5:
+        elif calm and self.x >= free_x and random.random() < (0.8 if self.sleepy else 0.5):
             self.plan = [("nap", u(8, 16)), ("yawn", 1.2)]
         else:
             self.plan = random.choice(
@@ -911,12 +1029,13 @@ class Cat:
             self.go(home)
         if self.mode == "walk":
             goal = min(max(self.goal, self.MIN_X), max_x)
-            if abs(goal - self.x) <= self.speed * dt:
+            speed = CHASE_SPEED if self.chasing else self.speed
+            if abs(goal - self.x) <= speed * dt:
                 self.x = goal
                 self._arrive(now, calm, free_x, home)
             else:
                 self.dir = 1 if goal > self.x else -1
-                self.x += self.dir * self.speed * dt
+                self.x += self.dir * speed * dt
         elif now >= self.until:
             if self.plan:
                 self._next(now)
@@ -937,6 +1056,8 @@ class Cat:
             "groom": (("groom", 1 + int(now * 3) % 2), False),
             "yawn": (("yawn",), False),
             "purr": (("sit", int(now * 4) % 3, True), False),
+            "eat": (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False),
+            "hiss": (("hiss",), False),
             "slap": (
                 ("slap", 1 if self.until - now > 1.3 else (2 if self.until - now > 1 else 3)),
                 False,
@@ -949,11 +1070,14 @@ class Cat:
         pose, flip = self.pose(now)
         cols, rows, cat_rows = math.ceil(7 * k), len(art), math.ceil(3 * k)
         left = round(self.x) - cols // 2
-        frame.pics["cat"] = (("cat", self.coat, pose, flip, k), left, top + rows - cat_rows, 1)
+        frame.pics[self.key] = (("cat", self.coat, pose, flip, k), left, top + rows - cat_rows, 1)
         if self.mode == "purr":
             beat = int((now - self.petted_at) / 0.1) % HEART_FRAMES
             row = max(top, top + rows - cat_rows - 2)
-            frame.pics["hearts"] = (("hearts", beat), left + 2, row, 4)
+            frame.pics[(self.key, "hearts")] = (("hearts", beat), left + 2, row, 4)
+        if self.mode == "eat":
+            bites = min(3, int((now - self.fed[-1]) / 0.6))
+            frame.pics[(self.key, "treat")] = (("treat", bites, k), left, top + rows - 1, 1)
         if pose[0] == "nap":
             for i, ch in enumerate("zZ"):
                 r = rows - cat_rows - (int(now * 1.5) + i) % 2
@@ -1076,6 +1200,7 @@ def render_idle(state, now, frame):
     if frame.gfx:
         top, art = len(frame.out), frame.art(6)
         frame.pics["idle"] = (("mug", SERVED_GLAZE, 0, 1.0), 2, top + 3, 2)
+        bar_life(state, now, frame, art, top=top, k=1.0, free_x=HOME_X, home=HOME_X)
         state["cat"].step(now, frame.width, calm=True, free_x=HOME_X, home=HOME_X)
         state["cat"].place(frame, art, top, 1.0, now)
         frame.add(art)
@@ -1098,6 +1223,98 @@ def cat_visit(state, now):
         state["toast"] = (f"{cat.name} knocked {who}'s cup off the bar.", now + 4)
     elif pid not in state["knocked"]:
         cat.target = None
+
+
+def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR0913
+    """What goes on around the barista: mice, visiting cats and fika buns.
+    With a `home`, the bar is empty and the barista sleeps through mice."""
+    cat, lane = state["cat"], frame.width
+    lane_ends = Cat.MIN_X, max(Cat.MIN_X, lane - Cat.MIN_X)
+    due = state.setdefault("due", set())
+    if "mouse" in due and "guest" not in state and cat.free():
+        due.discard("mouse")
+        side = 1 if cat.x < lane / 2 else -1
+        x, speed = cat.x + side * random.uniform(6, 10), random.uniform(9, 13)
+        state["mouse"] = {"x": x, "dir": side, "speed": speed, "last": now}
+        cat.chasing = home is None
+        quip = "gives chase" if cat.chasing else "sleeps right through it"
+        state["toast"] = (f"A mouse! {cat.name} {quip}.", now + 3)
+    if "mouse" in state:
+        run_mouse(state, now, frame, (top + len(art) - 1, k), lane_ends)
+    if "guest" in due and "mouse" not in state and cat.free() and lane >= 40:
+        due.discard("guest")
+        guest = Cat(now, lane_ends[0] if cat.x > lane / 2 else lane_ends[1], key="guest")
+        guest.coat = random.choice([c for c in range(len(COATS)) if c != cat.coat])
+        guest.name = random.choice([n for n in CAT_NAMES if n != cat.name])
+        guest.mode, guest.speed = "walk", 6.0
+        state["guest"] = {"cat": guest, "phase": "enter"}
+        state["toast"] = (f"{guest.title} wanders in.", now + 4)
+    if "guest" in state:
+        run_guest(state, now, lane_ends)
+        if "guest" in state:
+            state["guest"]["cat"].place(frame, art, top, k, now)
+    if daypart(now) == "fika" and free_x <= lane - 5:
+        bun = "lussekatt" if time.localtime(now).tm_mon == 12 else "kanelbulle"
+        frame.pics["bun"] = (("bun", bun), lane - 5, top + len(art) - 1, 2)
+
+
+def run_mouse(state, now, frame, spot, lane_ends):
+    """The mouse dashes for the end of the counter; a faster cat catches it."""
+    (row, k), cat, mouse = spot, state["cat"], state["mouse"]
+    mouse["x"] += mouse["dir"] * mouse["speed"] * min(0.5, now - mouse["last"])
+    mouse["last"] = now
+    if cat.chasing and abs(cat.x - mouse["x"]) < 2.5:
+        del state["mouse"]
+        state["mice"] = state.get("mice", 0) + 1
+        cat.chasing, cat.mode, cat.until, cat.plan = False, "sit", now + 2, [("groom", 2.5)]
+        state["toast"] = (f"{cat.name} caught the mouse, then let it go.", now + 4)
+    elif not lane_ends[0] <= mouse["x"] <= lane_ends[1]:
+        del state["mouse"]
+        if cat.chasing:
+            cat.chasing, cat.mode, cat.until, cat.plan = False, "sit", now + 1.5, [("yawn", 1.2)]
+            state["toast"] = (f"The mouse got away. {cat.name} pretends not to care.", now + 4)
+    else:
+        if cat.chasing:
+            cat.goal, cat.mode, cat.plan = mouse["x"], "walk", []
+        left = round(mouse["x"]) - math.ceil(3 * k) // 2
+        frame.pics["mouse"] = (("mouse", int(now * 10) % 2, mouse["dir"] < 0, k), left, row, 1)
+
+
+def run_guest(state, now, lane_ends):
+    """A stray walks up to the barista. A cat in a good mood shares the counter
+    for a while; a grumpy one hisses it out."""
+    cat, visit = state["cat"], state["guest"]
+    guest = visit["cat"]
+    dt, guest.last = min(0.5, now - guest.last), now
+    if visit["phase"] == "enter":
+        guest.dir = 1 if cat.x > guest.x else -1
+        goal = cat.x - guest.dir * 9
+        if abs(goal - guest.x) > guest.speed * dt:
+            guest.x += guest.dir * guest.speed * dt
+            return
+        state["visitors"] = state.get("visitors", 0) + 1
+        if random.random() < (0.8 if cat.pampered(now) else 0.4):
+            visit.update(phase="stay", leave_at=now + random.uniform(20, 40))
+            guest.mode, guest.until, guest.petted_at = "purr", now + 3, now
+            if cat.free():
+                cat.mode, cat.until, cat.plan, cat.petted_at = "purr", now + 3, [("sit", 6)], now
+            state["toast"] = (f"{guest.name} and {cat.name} share the counter. ♥", now + 4)
+        else:
+            visit["phase"], guest.mode, guest.speed, guest.dir = "leave", "walk", 18.0, -guest.dir
+            if cat.free():
+                cat.hiss(now)
+            state["toast"] = (f"{cat.name} hisses. {guest.name} bolts!", now + 4)
+    elif visit["phase"] == "stay":
+        if guest.mode == "purr" and now >= guest.until:
+            guest.mode = "sit"
+        if now >= visit["leave_at"]:
+            visit["phase"], guest.mode = "leave", "walk"
+            guest.dir = -1 if guest.x < cat.x else 1
+            state["toast"] = (f"{guest.name} heads home.", now + 3)
+    else:
+        guest.x += guest.dir * guest.speed * dt
+        if not lane_ends[0] <= guest.x <= lane_ends[1]:
+            del state["guest"]
 
 
 def gone(state, pid, now):
@@ -1124,7 +1341,7 @@ def render_cups(state, now, pids, frame, room_rows):
     visit = state.pop("visit", None)
     if cat.target not in visible:
         cat.target = None
-    if frame.gfx and cat.mode not in ("purr", "slap"):
+    if frame.gfx and cat.mode not in BUSY_MODES:
         pending = [p for p in visible if p in state["leaving"] and p not in state["knocked"]]
         target = cat.target if cat.target in pending else next(iter(pending), visit)
         if target in visible:
@@ -1142,7 +1359,9 @@ def render_cups(state, now, pids, frame, room_rows):
                 frame.pics.update(pics)
             cells.append((label, status))
         if frame.gfx and gi == cat_row:
-            cat.step(now, frame.width, calm, free_x=2 + len(group) * cell + 3)
+            free_x = 2 + len(group) * cell + 3
+            bar_life(state, now, frame, art, top=top, k=k, free_x=free_x)
+            cat.step(now, frame.width, calm, free_x=free_x)
             cat_visit(state, now)
             cat.place(frame, art, top, k, now)
         frame.add(art)
@@ -1159,7 +1378,11 @@ def header(state, now, width):
     awake = (
         f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
     )
-    for hint in (f"p to pet {state['cat'].name} · q to close", "p pet · q quit", ""):
+    battery = state.get("battery")
+    if battery and battery[0] and battery[1] is not None:
+        awake += f"{RESET}  {GOLD if state.get('saver') else DIM}battery {battery[1]}%"
+    name = state["cat"].name
+    for hint in (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit", ""):
         line = f"{awake}{RESET}   {DIM}{hint}{RESET}" if hint else f"{awake}{RESET}"
         if visible_len(line) + 1 <= width:  # +1: the cup emoji takes two cells
             break
@@ -1182,7 +1405,8 @@ def render(state, now):
     if state["toast"] and now < state["toast"][1]:
         frame.out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
     else:
-        frame.out.append(f"  {DIM}“{QUIPS[int(now // 8) % len(QUIPS)]}”{RESET}")
+        quips = DAY_QUIPS.get(daypart(now), QUIPS)
+        frame.out.append(f"  {DIM}“{quips[int(now // 8) % len(quips)]}”{RESET}")
     return frame.out, frame.pics
 
 
@@ -1190,7 +1414,8 @@ def frame_delay(state):
     """Animate smoothly while something moves; tick slowly while everything naps."""
     if not state["gfx"]:
         return IDLE_FRAME_S
-    if state["live"] or state["leaving"] or state["cat"].moving():
+    busy = state["live"] or state["leaving"] or "mouse" in state or "guest" in state
+    if busy or state["cat"].moving():
         return FRAME_S
     return IDLE_FRAME_S
 
@@ -1247,7 +1472,23 @@ def update(state):
     if working >= RUSH_AT and not state["rush"]:
         state["toast"] = (f"Rush hour! {working} agents brewing at once.", now + 5)
     state["rush"] = working >= RUSH_AT
-    state["cat"].speed = 12.0 if state["rush"] else 7.0
+    bar_clock(state, now)
+
+
+def bar_clock(state, now):
+    """Time of day: fika, a sleepier cat at night, and the odd mouse or stray."""
+    cat, part = state["cat"], daypart(now)
+    if part == "fika" and state.get("daypart") not in (None, "fika"):
+        bun = "lussekatt" if time.localtime(now).tm_mon == 12 else "kanelbulle"
+        state["toast"] = (f"Fika! {cat.name} sets out a {bun}.", now + 6)
+    state["daypart"] = part
+    cat.sleepy = part == "night"
+    cat.speed = 12.0 if state["rush"] else (5.0 if cat.sleepy else 7.0)
+    due = state.setdefault("due", set())
+    if random.random() < MOUSE_ODDS * (2 if cat.sleepy else 1):  # mice prefer the night
+        due.add("mouse")
+    if random.random() < GUEST_ODDS:
+        due.add("guest")
 
 
 def receipt(state, now):
@@ -1264,6 +1505,8 @@ def receipt(state, now):
     items = [(f"Espresso · {name}", f"×{n}") for name, n in orders] or [("Cups served", "0")]
     if state["broken"]:
         items.append((f"Cups broken by {cat.name}", str(state["broken"])))
+    if state.get("mice"):
+        items.append((f"Mice caught by {cat.name}", str(state["mice"])))
     stats = [("Mac kept awake", fmt_dur(awake))]
     if agent_time >= 1:
         stats.append(("Agent time", f"{fmt_dur(agent_time)} ({agent_time / awake:.1f}×)"))
@@ -1272,9 +1515,14 @@ def receipt(state, now):
     if brewing:
         stats.append(("Still brewing", str(len(brewing))))
     stats.append(("Barista", cat.name))
+    if state.get("visitors"):
+        stats.append(("Visiting cats", str(state["visitors"])))
     sections = [items, stats]
-    if cat.pets:
-        sections.append([(f"Tip for {cat.name}", f"{cat.pets} pet{'s' * (cat.pets > 1)} ♥")])
+    tip = [(f"Tip for {cat.name}", f"{cat.pets} pet{'s' * (cat.pets > 1)} ♥")] if cat.pets else []
+    if cat.fed:
+        tip.append(("Treats", f"×{len(cat.fed)}"))
+    if tip:
+        sections.append(tip)
     order = f"Order #{state['order']:04d}"
     rule = f"  {'-' * w}"
     out = ["", rule, f"  {'CAFFE RECEIPT':^{w}}"]
@@ -1286,9 +1534,48 @@ def receipt(state, now):
     print("\n".join(out))
 
 
-def start_caffeinate():
-    # -w ties caffeinate to our pid, so it stops even if caffe is killed.
-    return subprocess.Popen(["/usr/bin/caffeinate", "-dimsu", "-w", str(os.getpid())])
+def start_caffeinate(saver=False):
+    # -w ties caffeinate to our pid, so it stops even if caffe is killed. To save
+    # battery, drop -d and -u so the display can sleep while the system stays up.
+    flags = "-ims" if saver else "-dimsu"
+    return subprocess.Popen(["/usr/bin/caffeinate", flags, "-w", str(os.getpid())])
+
+
+def parse_battery(text):
+    """(on battery, charge %) from `pmset -g batt`. Charge is None without a battery."""
+    pct = re.search(r"(\d+)%", text)
+    return "'Battery Power'" in text, int(pct[1]) if pct else None
+
+
+def read_battery():
+    try:
+        out = subprocess.run(
+            ["/usr/bin/pmset", "-g", "batt"], capture_output=True, text=True, timeout=5, check=False
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_battery(out)
+
+
+def check_power(state, caf):
+    """On a low battery, let the display sleep; once plugged in, keep it on again.
+    Returns the caffeinate process now running."""
+    state["battery"] = battery = read_battery()
+    if battery is None:  # couldn't tell: leave things as they are
+        return caf
+    saver = battery[0] and battery[1] is not None and battery[1] <= LOW_BATTERY
+    if saver == state.get("saver", False):
+        return caf
+    state["saver"] = saver
+    message = (
+        f"Battery at {battery[1]}%. The display may sleep; agents keep brewing."
+        if saver
+        else "Plugged in. The display stays awake again."
+    )
+    state["toast"] = (message, time.time() + 6)
+    caf.terminate()
+    caf.wait()
+    return start_caffeinate(saver)
 
 
 def kitty_graphics(fd):
@@ -1329,9 +1616,14 @@ def draw(state, now, gallery, shown):
 
 def on_key(state, key):
     """Handle a key press. Returns True to close the bar."""
+    cat, now = state["cat"], time.time()
     if key == "p":
-        state["cat"].pet(time.time())
-        state["toast"] = (f"{state['cat'].name} purrs. ♥", time.time() + 3)
+        cat.pet(now)
+        state["toast"] = (f"{cat.name} purrs. ♥", now + 3)
+    elif key == "f":
+        ate = cat.feed(now)
+        treat = f"{cat.name} munches a treat." if ate else f"{cat.name} is full. Maybe later."
+        state["toast"] = (treat, now + 3)
     return key == "q"
 
 
@@ -1381,7 +1673,10 @@ def main():
         "order": random.randrange(1, 10000),
         "longest": (0, ""),
         "cat": cat,
-        "toast": (f"{cat.title} is on shift today.", time.time() + 6),
+        "toast": (
+            GREETINGS.get(daypart(time.time()), "{} is on shift today.").format(cat.title),
+            time.time() + 6,
+        ),
         "initialized": False,
         "gfx": False,
         "rush": False,
@@ -1402,9 +1697,11 @@ def main():
     try:
         tty.setcbreak(fd)
         state["gfx"] = kitty_graphics(fd)
-        last_poll, shown = 0.0, []
+        last_poll, last_power, shown = 0.0, 0.0, []
         while True:
             now = time.time()
+            if now - last_power >= BATTERY_POLL_S:
+                caf, last_power = check_power(state, caf), now
             if now - last_poll >= POLL_S:
                 update(state)
                 last_poll = now
@@ -1416,7 +1713,7 @@ def main():
             if r and on_key(state, sys.stdin.read(1).lower()):
                 break
             if caf.poll() is not None:
-                caf = start_caffeinate()
+                caf = start_caffeinate(state.get("saver", False))
     except KeyboardInterrupt:
         pass
     finally:

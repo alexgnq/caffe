@@ -6,6 +6,9 @@ cup for every AI coding agent you have running.
 ![caffe in action](caffe.gif)
 
 - **Keeps the Mac awake** until you quit (`caffeinate -dimsu` under the hood).
+- **Battery aware.** Unplugged and below 20%, the display may sleep while the
+  system stays awake, so your agents keep running. Plug in and the display
+  stays on again. The header shows the charge while you're on battery.
 - **Espressos for CLI sessions.** Copilot CLI, Codex CLI, Claude Code and Pi
   sessions running in a terminal get small cups and saucers, each in its own
   colour. New ones pour in, and finished ones drain and turn grey.
@@ -25,12 +28,23 @@ cup for every AI coding agent you have running.
   cups, checks on new ones, grooms, yawns and naps when things are quiet. It
   knocks every finished cup off the bar.
 - **Pet the cat** with `p`. It purrs.
+- **Feed the cat** with `f`. It munches a fish treat, up to three every ten
+  minutes before it's full.
+- **Mice.** Now and then a mouse dashes along the counter and the cat gives
+  chase. A slow mouse gets caught (and let go); a fast one escapes. A napping
+  cat sleeps right through it. Mice come out more at night.
+- **Visiting cats.** A stray wanders in every so often. A cat that's been
+  petted or fed lately shares the counter for a while; a grumpy one hisses it
+  out.
+- **Time of day.** Mornings open with a greeting. From 23:00 the cat takes the
+  night shift: it walks slower, naps more and gets its own quips. At 14:30
+  there's fika: a kanelbulle on the counter, or a lussekatt in December.
 - **Rush hour.** With four or more agents working at once, the cat hurries.
 - **Lots of agents?** Cups shrink to fit the screen. Anything that still
   doesn't fit is counted below the counter.
 - **Receipt on quit:** an order number, your espressos per agent, the cups the
-  cat broke, time awake against total agent time, the longest session, and the
-  cat's tip in pets. Open apps and Copilot activity-only mugs don't count.
+  cat broke, the mice it caught, time awake against total agent time, the
+  longest session, visiting cats, and the cat's tip in pets and treats. Open apps and Copilot activity-only mugs don't count.
 
 ## Install
 
@@ -54,7 +68,7 @@ pictures.
 caffe
 ```
 
-Press `p` to pet the cat, and `q` or `Ctrl-C` to close the bar. `caffe --help`
+Press `p` to pet the cat, `f` to feed it, and `q` or `Ctrl-C` to close the bar. `caffe --help`
 prints a short summary.
 
 To update to the latest version:
@@ -78,6 +92,9 @@ including Copilot session tracking and app resource reporting.
   the next successful read.
 - `caffeinate` is tied to caffe's process ID, so the Mac can sleep again as soon
   as caffe exits, even if it's killed.
+- Every 30 seconds, `pmset -g batt` is read. On a low battery caffe restarts
+  `caffeinate` as `-ims`, without the display (`-d`) and user-activity (`-u`)
+  assertions.
 - The art is drawn in Python when it's first needed and sent to the terminal
   once. After that caffe only moves the pictures around, redraws only the text
   that changed, and slows down when nothing is moving, so it uses very little
