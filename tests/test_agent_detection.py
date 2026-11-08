@@ -218,8 +218,22 @@ class AgentDetectionTests(unittest.TestCase):
                         (44, 41, "ttys006", 4, "/bin/claude", "claude"),
                     ]
                 )
-                self.assertEqual(set(found), {42, 43, 44})
+                apps = {(40, "t3")} if app.startswith("T3") else set()
+                self.assertEqual(set(found), {42, 43, 44} | apps)
                 self.assertEqual(found[42], ("codex", "ttys004", 940, 2, 0))
+
+    def test_t3_code_gets_one_latte_for_everything_it_runs(self):
+        app = "/Applications/T3 Code (Beta).app/Contents/MacOS/T3 Code (Beta)"
+        found = sessions(
+            [
+                (40, 1, "??", 1, app, "T3 Code (Beta)"),
+                (41, 40, "??", 2, app, "T3 Code (Beta) --server"),  # its own backend
+                (42, 41, "??", 3, "/bin/node", "node copilot --acp"),
+                (43, 42, "??", 4, "/opt/copilot", "copilot --acp"),  # an agent it runs
+            ]
+        )
+        self.assertEqual(found, {(40, "t3"): ("t3", "app:T3 Code", 940, 10, 0)})
+        self.assertEqual(caffe["DRINKS"]["t3"][0], "T3 Code")
 
 
 if __name__ == "__main__":

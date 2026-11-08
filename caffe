@@ -2,8 +2,8 @@
 """caffe: keep the Mac awake, with a café table of your running agent sessions.
 
 Every interactive Copilot CLI / Codex CLI / Claude Code / Pi / OpenCode session
-gets a card: a cup seen from above, its project, and what it's doing. Brewing
-coffee swirls as it's stirred; a session that finished its turn is ready, with
+gets a card: a cup of coffee, its project, and what it's doing. Brewing coffee
+steams and swirls as it's stirred; a session that finished its turn is ready, with
 a biscuit on the saucer; one left alone goes cold. Ready orders come first.
 When a session ends, its cup drains and the barista cat knocks it off the
 table. The cat also sniffs new orders, chases the odd mouse, and naps when the
@@ -11,8 +11,9 @@ bar is quiet. Stray cats drop by now and then, and at 14:30 there's fika.
 
 On battery at 20% or less, the display may sleep; agents keep running.
 
-Each open app gets a latte, with its CPU and RAM. Running local Copilot
-app sessions and chats also get cards labelled "Agent"; idle ones are hidden.
+Each open app gets a latte, with its CPU and RAM. Running local Copilot app
+sessions and chats also get cards labelled "Agent"; idle ones are hidden. T3 Code
+sessions get cards that say exactly what they're doing.
 
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
 kitty, WezTerm or a recent iTerm2. Other terminals get the cards without pictures.
@@ -54,13 +55,19 @@ AGENTS = {
     "pi": ("Pi", c256(114), (110, 196, 120)),
     "opencode": ("OpenCode", c256(211), (232, 112, 160)),
 }
-DRINKS = {**AGENTS, "vscode": ("VS Code", c256(44), (40, 190, 210))}
+DRINKS = {
+    **AGENTS,
+    "vscode": ("VS Code", c256(44), (40, 190, 210)),
+    "t3": ("T3 Code", c256(255), (52, 52, 60)),
+}
 COPILOT_SESSION_KIND = "copilot-session"
 COPILOT_SESSION_DB = Path.home() / ".copilot" / "data.db"
+T3_SESSION_DB = Path.home() / ".t3" / "userdata" / "statev2.sqlite"
+T3_FORGET_S = 3600.0  # a T3 session this quiet leaves the table
 SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
 GOLD = c256(220)
-POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S = 3.0, 0.12, 0.5, 2.0
+POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S = 3.0, 1 / 15, 0.5, 2.0
 DRAIN_S, SERVED_S = 3.0, 15.0  # finished cups the cat can't reach leave on their own
 BUSY_CPU, WORKING_CPU = 25.0, 3.0
 IDLE_AFTER_S, COLD_S = 30.0, 15 * 60  # a session this quiet is idle; this long, its cup is cold
@@ -149,7 +156,10 @@ UI_APPS = {
     "ChatGPT": "codex",
     "GitHub Copilot": "copilot",
     "Claude": "claude",
+    "T3 Code": "t3",
+    "T3 Code (Beta)": "t3",
 }
+TERMINAL_HOSTS = ("vscode", "t3")  # apps whose terminals' agents keep cups of their own
 
 
 def ui_host(pid, processes, names):
@@ -211,6 +221,57 @@ def scan_copilot_sessions():
     except (OSError, sqlite3.Error):
         # The app's metadata index is optional and its schema is undocumented.
         return None
+
+
+T3_SESSIONS = """
+    SELECT t.thread_id, t.title, t.created_at, s.provider, s.updated_at,
+           r.status, r.requested_at, r.completed_at,
+           (SELECT count(*) FROM orchestration_v2_projection_runtime_requests q
+             WHERE q.thread_id = t.thread_id AND q.resolved_at IS NULL)
+    FROM orchestration_v2_projection_provider_sessions s
+    JOIN orchestration_v2_projection_threads t ON t.thread_id = s.thread_id
+    LEFT JOIN orchestration_v2_projection_runs r ON r.thread_id = t.thread_id
+     AND r.ordinal = (SELECT max(ordinal) FROM orchestration_v2_projection_runs
+                       WHERE thread_id = t.thread_id)
+    WHERE s.status != 'stopped' AND t.archived_at IS NULL AND t.deleted_at IS NULL
+"""
+
+
+def t3_agent(provider):
+    """The agent behind one of T3 Code's providers, such as "acpRegistry_copilot"."""
+    provider = provider.lower()
+    return next((kind for kind in AGENTS if kind in provider), "t3")
+
+
+def scan_t3_sessions(now):
+    """T3 Code's open sessions, and what each is doing, from its own records:
+    ({key: session}, {key: (state, since, note)}). Read-only, and metadata only:
+    titles and statuses, never messages. None if they can't be read."""
+    try:
+        uri = T3_SESSION_DB.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            rows = connection.execute(T3_SESSIONS).fetchall()
+    except (OSError, sqlite3.Error):
+        return None  # its records are optional, and their layout undocumented
+    sessions, told, when = {}, {}, parse_session_timestamp
+    for thread, title, created, provider, updated, run, requested, completed, asks in rows:
+        if run == "running":
+            word, since, note = "brewing", when(requested), "in T3 Code"
+        elif asks:
+            word, since, note = "ready", when(updated), "needs your approval"
+        elif run:
+            word, since = "ready", when(completed or updated)
+            note = "run failed" if run == "failed" else "waiting for you"
+        else:
+            word, since, note = "idle", when(updated), "in T3 Code"
+        if word != "brewing" and not asks and now - since > T3_FORGET_S:
+            continue
+        name = re.sub(r"[\x00-\x1f\x7f]", "", re.sub(r"\s+", " ", str(title or "")).strip())
+        key = f"t3:{thread}"
+        sessions[key] = (t3_agent(str(provider)), name or "T3 Code", when(created), 0.0, 0.0)
+        told[key] = (word, since, note)
+    return sessions, told
 
 
 def scan_agents():
@@ -279,10 +340,11 @@ def agent_sessions(out, commands, now):
         if len(cols) == 7
     }
     found, apps, usage, children = {}, {}, {}, {}
-    # UI cups belong to applications, regardless of their underlying agents.
+    # UI cups belong to applications, regardless of their underlying agents. An
+    # app that runs a copy of itself still gets one latte, for its outermost process.
     for pid, cols in processes.items():
         match = re.search(r"/([^/]+)\.app/Contents/MacOS/[^/]+$", names.get(pid, ""))
-        if match and match[1] in UI_APPS:
+        if match and match[1] in UI_APPS and ui_host(pid, processes, names)[0] == pid:
             kind = UI_APPS[match[1]]
             apps[pid, kind] = [kind, f"app:{DRINKS[kind][0]}", now - parse_etime(cols[5]), 0, 0]
     for pid, cols in processes.items():
@@ -310,8 +372,8 @@ def agent_sessions(out, commands, now):
         kind = agent_kind(cols[6]) or agent_kind(names.get(pid, ""))
         if os.path.basename(names.get(pid, "")) == "copilot-runtime":
             kind = "copilot"
-        # CLI sessions in VS Code's terminal still get individual espressos.
-        if kind and cols[2] != "??" and (not host or host[1] == "vscode"):
+        # CLI sessions in VS Code's or T3 Code's terminals still get individual espressos.
+        if kind and cols[2] != "??" and (not host or host[1] in TERMINAL_HOSTS):
             found[pid] = (kind, int(cols[1]), cols[2], now - parse_etime(cols[5]))
     # An agent's helpers belong to its session, rather than getting cups of their own.
     roots = {pid for pid, (_, ppid, _, _) in found.items() if ppid not in found}
@@ -371,6 +433,11 @@ def session_state(state, pid, now):
     use little CPU while they wait on the model, so a session keeps brewing
     until it has been quiet for IDLE_AFTER_S. Quiet after a real spell of work,
     it's most likely waiting for you: ready. Quiet without one, it's idle."""
+    told = state.get("told", {}).get(pid)
+    if told:  # the app said what it's doing: no need to guess
+        word, since, _ = told
+        cold = word != "brewing" and now - since >= COLD_S
+        return ("cold" if cold else word), since
     brew_start, last_active = state.get("activity", {}).get(pid, (None, None))
     if last_active is not None and now - last_active < IDLE_AFTER_S:
         return "brewing", brew_start
@@ -517,6 +584,24 @@ def path(points, r):
     return union(*(capsule(*a, *b, r) for a, b in zip(points, points[1:])))
 
 
+def curve(points, width):
+    """A rounded cubic brush stroke, sampled at eight intervals."""
+    a, b, c, d = points
+    return path(
+        [
+            tuple(
+                (1 - t) ** 3 * a[j]
+                + 3 * (1 - t) ** 2 * t * b[j]
+                + 3 * (1 - t) * t * t * c[j]
+                + t**3 * d[j]
+                for j in (0, 1)
+            )
+            for t in (i / 8 for i in range(9))
+        ],
+        width,
+    )
+
+
 class Img:
     """An RGBA sprite `cols` x `rows` cells big, with its shapes zoomed by `k`."""
 
@@ -588,14 +673,16 @@ class Img:
         return self
 
 
-# ---- Cups, seen from above on their saucers. A cup is 6 cols x 3 rows: a
-# 48-unit square, so circles stay round. Brewing coffee swirls as it's stirred,
+# ---- Drinks, seen from the side and a little above, like the cat: you see the
+# cup, its handle and saucer, and look down onto the coffee. A drink is 6 cols x
+# 3 rows, a 48-unit square. Brewing coffee swirls as it's stirred and steams;
 # finished coffee gets latte art, a ready order a biscuit, cold coffee a skin.
 SAUCER, SAUCER_RING = (238, 233, 224), (222, 215, 203)
-CREMA, CREMA_EDGE, COFFEE, FOAM = (200, 146, 92), (158, 102, 58), (58, 34, 22), (248, 238, 220)
+COFFEE, FOAM = (58, 34, 22), (248, 238, 220)
 BISCUIT = (214, 160, 96)
-CUP_X, CUP_Y = 22, 24  # the middle of the cup in its picture
-STIR_FRAMES, POUR_FRAMES = 16, 6
+CUP_X, CUP_Y = 22, 24  # the middle of a drink's picture
+SQUASH = 0.28  # how flat a coffee surface looks from this angle
+STIR_FRAMES, POUR_FRAMES = 16, 12
 LOOKS = ("brewing", "idle", "ready", "cold", "pour", "drain", "empty")
 
 
@@ -608,12 +695,45 @@ def ring(cx, cy, r, width):
     )
 
 
-def latte_heart(cx, cy, s):
+def swirl(img, centre, frame, r, color=FOAM):
+    """A swirl of foam on a surface seen at an angle, turning with `frame`."""
+    cx, cy = centre
+    turn = frame / STIR_FRAMES * 2 * math.pi
+    for arm in (0, math.pi):
+        pts = [
+            (cx + math.cos(a) * d, cy + math.sin(a) * d * SQUASH)
+            for a, d in ((turn + arm + t * 0.55, 1 + t * r / 9) for t in range(9))
+        ]
+        img.fill(path(pts, 0.75), color, 0.9)
+
+
+def foam_heart(cx, cy, s):
+    """A heart of foam on a surface seen at an angle."""
     return union(
-        circle(cx - 0.9 * s, cy - 0.3 * s, s),
-        circle(cx + 0.9 * s, cy - 0.3 * s, s),
-        poly((cx - 1.85 * s, cy + 0.05 * s), (cx + 1.85 * s, cy + 0.05 * s), (cx, cy + 2.1 * s)),
+        ellipse(cx - 1.25 * s, cy - 0.15 * s, 1.5 * s, 0.6 * s),
+        ellipse(cx + 1.25 * s, cy - 0.15 * s, 1.5 * s, 0.6 * s),
+        poly((cx - 2.7 * s, cy), (cx + 2.7 * s, cy), (cx, cy + 1.1 * s)),
     )
+
+
+def steam(img, cx, span, frame, wisps=2):
+    """Wisps rising from a hot drink, over the rows of units in `span`."""
+    top, bottom = span
+    phase = frame / STIR_FRAMES * 2 * math.pi
+    tall = bottom - top
+    for j in range(wisps):
+        base = cx + (j - (wisps - 1) / 2) * 5.5
+
+        def dist(x, y, base=base, off=j * 2.3):
+            h = bottom - y
+            centre = base + math.sin(h * 0.38 - phase + off) * (0.6 + h * 0.09)
+            return abs(x - centre) - (0.9 + h * 0.03)
+
+        def alpha(_x, y):
+            h = (bottom - y) / tall
+            return 0.5 * min(1.0, h * 4) * max(0.0, 1 - h) ** 0.9
+
+        img.fill((dist, (base - 6, top, base + 6, bottom)), (246, 242, 238), alpha)
 
 
 def cup_sprite(glaze, look, frame=0, k=1.0):
@@ -624,121 +744,138 @@ def cup_sprite(glaze, look, frame=0, k=1.0):
 
 
 def draw_cup(img, glaze, look, frame):
-    cx, cy = CUP_X, CUP_Y
-    img.fill(circle(cx + 1.6, cy + 2.2, 20.5), INK, 0.35)  # its shadow on the table
-    img.fill(circle(cx, cy, 20), SAUCER)
-    img.fill(ring(cx, cy, 15.5, 0.8), SAUCER_RING)
-    img.fill(capsule(cx + 11, cy + 7, cx + 18.5, cy + 12.5, 2.6), mix(glaze, INK, 0.15))
-    img.fill(circle(cx + 1, cy + 1.4, 13.2), INK, 0.25)
-    img.fill(circle(cx, cy, 13), glaze)
-    img.fill(ring(cx, cy, 12.2, 1.2), mix(glaze, WHITE, 0.35))
-    inside = circle(cx, cy, 10.4)
-    if look == "empty" or (look == "drain" and frame >= 2):
-        img.fill(inside, mix(SAUCER, glaze, 0.12))
-        img.fill(ring(cx + 1, cy + 1, 6.5, 1.2), (150, 110, 80), 0.35)  # the stain left behind
-        return
-    if look == "cold":
-        img.fill(inside, COFFEE)
-        img.fill(ring(cx, cy, 9.6, 1.2), (96, 64, 44))
-        img.fill(ellipse(cx - 3, cy - 3, 3.5, 2), (120, 86, 62), 0.35)  # a skin on the coffee
-        return
-    if look in ("pour", "drain"):
-        img.fill(inside, mix(SAUCER, glaze, 0.12))
-        r = 10.4 * ((frame + 1) / POUR_FRAMES if look == "pour" else 0.6)
-        img.fill(
-            circle(cx, cy, r), CREMA if look == "drain" or frame >= POUR_FRAMES - 2 else COFFEE
-        )
-        if look == "pour":  # the stream lands in the middle
-            img.fill(circle(cx, cy, 1.6), (104, 62, 38))
-        return
-    img.fill(inside, CREMA)
-    img.fill(ring(cx, cy, 9.8, 1.4), CREMA_EDGE, 0.8)
-    if look == "brewing":
-        turn = frame / STIR_FRAMES * 2 * math.pi
-        for arm in (0, math.pi):  # a swirl of foam, turning as the coffee is stirred
-            pts = [
-                (cx + math.cos(turn + arm + t * 0.55) * r, cy + math.sin(turn + arm + t * 0.55) * r)
-                for t, r in ((t, 1.2 + t * 0.95) for t in range(9))
-            ]
-            img.fill(path(pts, 0.9), FOAM, 0.85)
-        return
-    img.fill(latte_heart(cx, cy - 1.2, 2.8), FOAM)
-    if look == "ready":  # served with a biscuit on the saucer
-        img.fill(capsule(cx - 15.5, cy + 10, cx - 9, cy + 15.5, 2.6), BISCUIT)
-        for t in (0.3, 0.6):
-            img.fill(circle(cx - 15.5 + 6.5 * t, cy + 10 + 5.5 * t, 0.6), (170, 116, 62))
+    cx, rim = CUP_X, 23
+    cream = (248, 235, 211)
+    shade = (195, 170, 137)
+    if glaze == SERVED_GLAZE:
+        cream, shade = (205, 205, 206), (145, 145, 151)
+    img.fill(ellipse(cx + 1, 44.5, 18, 2.5), INK, 0.28)
+    img.fill(ellipse(cx, 43, 18, 3.5), mix(glaze, cream, 0.65))
+    img.fill(ellipse(cx, 42, 17.5, 3), cream)
+    img.fill(ellipse(cx, 41.5, 11, 1.7), shade, 0.35)
+    handle = curve(((cx + 10, 26), (cx + 23, 20), (cx + 23, 39), (cx + 9, 35)), 2.6)
+    img.fill(grow(handle, 0.5), shade)
+    img.fill(handle, cream)
+    bowl = clip(ellipse(cx, 28, 13, 12.5), rbox(0, rim, 48, 42, 0))
+
+    def ceramic(x, y):
+        color = glaze if 31 < y < 36 else cream
+        return mix(color, shade, max(0, (x - cx + 1) / 28) * 0.42)
+
+    img.fill(bowl, ceramic)
+    img.fill(ellipse(cx, 40, 6.2, 1.5), shade)
+    img.fill(ellipse(cx, 39.5, 6, 1), cream)
+    img.fill(ellipse(cx, rim, 13, 4.4), shade)
+    img.fill(ellipse(cx, rim - 0.5, 12.7, 4.2), cream)
+    inside = ellipse(cx, rim - 0.1, 11.3, 3.3)
+    img.fill(inside, (124, 87, 58))
+    full = {
+        "pour": (frame + 1) / POUR_FRAMES,
+        "drain": (0.65, 0.25, 0)[min(frame, 2)],
+        "empty": 0,
+    }.get(look, 1)
+    if full:
+        coffee = COFFEE if look == "cold" else mix((96, 55, 31), (199, 145, 83), full)
+        surface = clip(inside, ellipse(cx, rim + (1 - full) * 2, 11.3, 3.3 * full))
+        img.fill(surface, coffee)
+        if look == "cold":
+            img.fill(ellipse(cx - 3, rim - 0.3, 3.5, 0.8), (141, 105, 74), 0.5)
+        if full == 1 and look not in ("pour", "drain", "cold"):
+            if look == "brewing":
+                swirl(img, (cx, rim), frame, 8.5)
+                steam(img, cx, (1, 17), frame)
+            else:
+                img.fill(foam_heart(cx, rim - 0.3, 1.7), FOAM)
+    else:
+        img.fill(inside, (217, 194, 162))
+        img.fill(ellipse(cx, rim + 1.2, 6.5, 1.2), (159, 117, 80), 0.55)
+    if look == "pour":
+        strength = min(1, (1 - full) * 5)
+        img.fill(capsule(cx - 2, 0, cx, rim, 0.9), (112, 69, 39), strength)
+        img.fill(ellipse(cx, rim, 2.5, 0.7), FOAM, strength * 0.7)
+    if look == "ready":
+        img.fill(rbox(5, 40, 14, 44.5, 1.6), (185, 123, 65))
+        img.fill(rbox(5, 39.5, 14, 43.5, 1.5), BISCUIT)
+        for x in (7, 11.5):
+            img.fill(circle(x, 41, 0.5), (126, 81, 46))
 
 
-KNOCK_FRAMES, KNOCK_S = 12, 1.0
-LATTE, LATTE_FOAM = (214, 168, 118), (238, 218, 190)
+KNOCK_FRAMES, KNOCK_S = 16, 1.0
+LATTE_FOAM = (250, 236, 210)
+GLASS_TOP, GLASS_BOTTOM = 13.0, 41.5
 
 
 def latte_sprite(glaze, look, frame=0, k=1.0):
-    """An open app's latte, from above: a tall glass on a coaster in its colour."""
+    """Layered coffee in a rounded glass on a coloured coaster."""
     img = Img(math.ceil(6 * k), math.ceil(3 * k), k)
     draw_latte(img, glaze, look, frame)
     return img
 
 
 def draw_latte(img, glaze, look, frame):
-    cx, cy = CUP_X, CUP_Y
-    img.fill(circle(cx + 1.6, cy + 2.2, 19.5), INK, 0.35)
-    img.fill(circle(cx, cy, 19), mix(glaze, INK, 0.25))  # the coaster
-    img.fill(circle(cx, cy, 18.2), glaze)
-    img.fill(ring(cx, cy, 16.4, 0.7), mix(glaze, WHITE, 0.45), 0.8)
-    img.fill(circle(cx + 1.2, cy + 1.6, 14), INK, 0.3)
-    img.fill(circle(cx, cy, 14), (226, 234, 240), 0.6)  # the glass's rim
-    img.fill(ring(cx, cy, 13.3, 1.2), WHITE, 0.7)
-    inside = circle(cx, cy, 12)
-    glass = mix(glaze, WHITE, 0.65)  # the coaster, through an empty glass
-    if look == "empty" or (look == "drain" and frame >= 2):
-        img.fill(inside, glass, 0.6)
-        img.fill(ring(cx, cy, 9.5, 1.6), LATTE_FOAM, 0.55)  # foam left on the glass
-    elif look in ("pour", "drain"):
-        img.fill(inside, glass, 0.6)
-        r = 12 * ((frame + 1) / POUR_FRAMES if look == "pour" else 0.6)
-        img.fill(circle(cx, cy, r), LATTE)
-        if look == "pour":  # milk landing in the middle
-            img.fill(circle(cx, cy, 1.8), WHITE)
-    else:
-        img.fill(inside, LATTE)
-        img.fill(ring(cx, cy, 11.2, 1.6), LATTE_FOAM, 0.9)
-        if look == "busy":  # stirred, like a brewing cup
-            turn = frame / STIR_FRAMES * 2 * math.pi
-            for arm in (0, math.pi):
-                pts = [
-                    (
-                        cx + math.cos(turn + arm + t * 0.55) * r,
-                        cy + math.sin(turn + arm + t * 0.55) * r,
-                    )
-                    for t, r in ((t, 1.2 + t * 1.05) for t in range(9))
-                ]
-                img.fill(path(pts, 1.0), FOAM, 0.9)
-        else:  # a rosetta
-            for i in range(5):
-                y = cy - 6 + i * 2.6
-                img.fill(ellipse(cx, y, 5.4 - i * 0.9, 1.3), FOAM)
-            img.fill(capsule(cx, cy - 7.5, cx, cy + 7, 0.45), FOAM)
-    img.fill(path(((cx - 10, cy - 6), (cx - 7, cy - 10), (cx - 2, cy - 12.6)), 0.8), WHITE, 0.6)
+    cx, top, bottom = CUP_X, GLASS_TOP, GLASS_BOTTOM
+    img.fill(ellipse(cx + 1, 45, 17, 2.6), INK, 0.28)
+    coaster = poly((4, 40.5), (22, 36), (41, 41.5), (23, 47))
+    img.fill(grow(coaster, 0.5), mix(glaze, INK, 0.3))
+    img.fill(coaster, glaze)
+    glass = union(
+        poly((cx - 11, top), (cx + 11, top), (cx + 9.5, bottom - 2), (cx - 9.5, bottom - 2)),
+        ellipse(cx, bottom - 2, 9.5, 3),
+    )
+    img.fill(grow(glass, 0.5), (221, 228, 222), 0.4)
+    img.fill(glass, (190, 206, 207), 0.16)
+    full = {
+        "pour": (frame + 1) / POUR_FRAMES,
+        "drain": (0.65, 0.25, 0)[min(frame, 2)],
+        "empty": 0,
+    }.get(look, 1)
+    surface = bottom - (bottom - top) * full
+    if full:
+        filled = clip(glass, rbox(0, surface, 48, 48, 0))
+
+        def coffee(_x, y):
+            # The espresso diffuses into milk, with a darker layer at the foot.
+            return mix((241, 214, 169), (131, 82, 51), ((y - top) / (bottom - top)) ** 1.7)
+
+        img.fill(filled, coffee)
+        img.fill(clip(filled, rbox(0, surface, 48, surface + 4, 0)), LATTE_FOAM)
+        img.fill(clip(glass, ellipse(cx, surface, 10.4, 3.1)), LATTE_FOAM)
+    # Reflections follow the sides; the coffee remains visible through the glass.
+    img.fill(capsule(cx - 8, top + 6, cx - 7, bottom - 3, 0.65), WHITE, 0.7)
+    img.fill(capsule(cx + 9, top + 5, cx + 8.3, bottom - 4, 0.35), WHITE, 0.4)
+    img.fill(ellipse(cx, top, 11, 3.8), (224, 232, 225), 0.65)
+    img.fill(ellipse(cx, top, 9.7, 2.9), LATTE_FOAM if full == 1 else (65, 69, 66))
+    if look == "pour":
+        strength = min(1, (1 - full) * 5)
+        img.fill(capsule(cx - 1, 0, cx, top, 0.9), FOAM, strength)
+        img.fill(clip(glass, capsule(cx, top, cx, surface, 0.9)), FOAM, strength * 0.6)
+    if full == 1 and look not in ("pour", "drain"):
+        if look == "busy":
+            swirl(img, (cx, top), frame, 8, (174, 121, 72))
+        else:
+            for i in range(4):
+                img.fill(ellipse(cx, top - 1.3 + i * 0.8, 4 - i * 0.8, 0.5), (190, 141, 88))
+            img.fill(capsule(cx, top - 2, cx, top + 2, 0.4), FOAM)
 
 
 def knock_sprite(glaze, frame, k=1.0, drink="cup"):
-    """A cup the cat pushed: it slides off to the left, spins, and drops off the
-    table. The picture is 4 cols wider than a cup, which starts at its right."""
+    """A drink the cat pushed: it tips over to the left and drops off the table.
+    The picture is 4 cols wider than a drink, which starts at its right."""
     img = Img(math.ceil(10 * k), math.ceil(3 * k), k)
-    t = frame / KNOCK_FRAMES
-    fall = max(0.0, t - 0.4) / 0.6
-    img.move(-t * 2.2, (CUP_X, CUP_Y), (32 - 26 * min(1.0, t / 0.6), 0), scale=1 - 0.75 * fall)
+    t = frame / (KNOCK_FRAMES - 1)
+    fall = max(0.0, t - 0.45) / 0.55
+    tip = min(1.0, t / 0.45)
+    img.move(-1.5 * tip, (CUP_X - 10, 44), (32 - 14 * tip, 26 * fall * fall))
     img.fade = 1 - fall
     (draw_latte if drink == "latte" else draw_cup)(img, glaze, "empty", 0)
     return img
 
 
-# ---- The barista cat, drawn from simple shapes and seen from above, like the
-# cups. It sits looking up at you, walks facing right (mirrored to go left),
-# and naps curled up. Each coat: name, fur, markings, light fur, eyes, pattern.
+# ---- The barista cat, drawn with rounded brush strokes and a teal neckerchief.
+# It walks facing right (mirrored to go left), and naps curled up.
+# Each coat: name, fur, markings, light fur, eyes, pattern.
 COATS = [
-    ("orange tabby", (238, 148, 66), (196, 104, 42), (252, 228, 194), (132, 190, 72), "tabby"),
+    ("orange tabby", (218, 164, 108), (168, 112, 65), (255, 237, 205), (132, 190, 72), "tabby"),
     ("tuxedo", (54, 54, 62), (54, 54, 62), (240, 240, 236), (232, 200, 70), None),
     ("grey tabby", (160, 160, 170), (112, 112, 124), (224, 224, 230), (226, 172, 62), "tabby"),
     ("calico", (246, 242, 232), (64, 56, 52), (250, 248, 242), (132, 190, 72), "calico"),
@@ -749,221 +886,139 @@ CAT_NAMES = ["Mocha", "Miso", "Biscotti", "Pixel", "Bean", "Cortado", "Nibs", "R
 CALICO_ORANGE = (232, 140, 60)
 
 
-def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=0):  # noqa: PLR0913
-    """Sitting on the table and looking up at you."""
-    cx, hy, sway = 30, 17, (0, 2.5, -2)[tail]
-    eyes = [(cx - 4, hy + 0.5), (cx + 4, hy + 0.5)]
-    pose = {
-        "tail": path(
-            ((cx + 8, 42), (cx + 13.5, 39), (cx + 15 + sway, 31), (cx + 13 + sway, 25)), 2.4
-        ),
-        "body": ellipse(cx, 33, 11, 11.5),
-        "head": ellipse(cx, hy, 10, 9.3),
-        "ears": [
-            poly((cx - 9.5, hy - 2), (cx - 8, hy - 12.5), (cx - 2.5, hy - 8.5)),
-            poly((cx + 2.5, hy - 8.5), (cx + 8, hy - 12.5), (cx + 9.5, hy - 2)),
-        ],
+def cat_face(cx, cy, *, side=False, closed=False):
+    """A broad face, small ears and an ink-dot expression."""
+    rx, ry = (8.8, 8) if side else (12.2, 10)
+    eyes = [(cx + 3.4, cy - 0.3)] if side else [(cx - 4.7, cy), (cx + 4.7, cy)]
+    muzzle_x = cx + 6 if side else cx
+    ears = [
+        grow(poly((cx - rx + 1, cy - 3), (cx - rx + 1, cy - 12), (cx - 2, cy - 8)), 0.5),
+        grow(poly((cx + 2, cy - 8), (cx + rx - 1, cy - 12), (cx + rx - 1, cy - 3)), 0.5),
+    ]
+    return {
+        "head": ellipse(cx, cy, rx, ry),
+        "ears": ears,
         "inner": [
-            poly((cx - 8, hy - 4), (cx - 7.2, hy - 10), (cx - 4, hy - 8)),
-            poly((cx + 4, hy - 8), (cx + 7.2, hy - 10), (cx + 8, hy - 4)),
+            poly((cx - rx + 3, cy - 5), (cx - rx + 2.5, cy - 9.5), (cx - 5, cy - 7)),
+            poly((cx + 5, cy - 7), (cx + rx - 2.5, cy - 9.5), (cx + rx - 3, cy - 5)),
         ],
-        "light": [ellipse(cx, 36.5, 5.5, 5.5), ellipse(cx, hy + 5.2, 3.8, 2.7)],
-        "paws": [ellipse(cx - 4.5, 43.6, 3, 2), ellipse(cx + 4.5, 43.6, 3, 2)],
-        "nose": poly((cx - 1.4, hy + 3.4), (cx + 1.4, hy + 3.4), (cx, hy + 4.8)),
-        "eyes": [] if closed or groom or yawn else eyes,
-        "eye": 1.25,
-        "closed": [path(((x - 1.9, y), (x, y + 1.1), (x + 1.9, y)), 0.6) for x, y in eyes],
-        "stripes": [
-            capsule(cx, hy - 9.4, cx, hy - 6.2, 0.75),
-            capsule(cx - 2.8, hy - 8.8, cx - 2.3, hy - 5.9, 0.7),
-            capsule(cx + 2.8, hy - 8.8, cx + 2.3, hy - 5.9, 0.7),
-            *(
-                capsule(cx + s * 10.6, y, cx + s * 7, y + 1, 0.8)
-                for s in (-1, 1)
-                for y in (29.5, 34)
-            ),
+        "light": [ellipse(muzzle_x, cy + 4, 4 if side else 6, 3.2)],
+        "nose": ellipse(muzzle_x, cy + 2.8, 1.15, 0.8),
+        "eyes": [] if closed else eyes,
+        "eye": 0.85,
+        "closed": [
+            curve(((x - 1.5, y), (x - 0.5, y + 1.5), (x + 0.5, y + 1.5), (x + 1.5, y)), 0.5)
+            for x, y in eyes
         ],
-        "patches": [
-            (ellipse(cx - 6, 30, 6, 5), CALICO_ORANGE),
-            (ellipse(cx + 5, hy - 4, 5, 4), None),
-            (ellipse(cx + 6, 39, 4.5, 4), CALICO_ORANGE),
+        "stripes": [capsule(cx + x, cy - 8, cx + x * 0.7, cy - 5, 0.7) for x in (-3, 0, 3)],
+        "patches": [(ellipse(cx - 4, cy - 4, 5, 5), CALICO_ORANGE)],
+        "whiskers": [
+            capsule(muzzle_x + s * 3, cy + 4 + j, muzzle_x + s * 8, cy + 3 + 2 * j, 0.32)
+            for s in (-1, 1)
+            for j in (0, 1)
         ],
     }
-    if slap:  # a paw reaching out to the left, to push a cup off the table
-        px, py = (cx - 10, 27) if slap == 1 else (cx - 17, 35)
-        pose["legs"] = [capsule(cx - 6, 34, px, py, 2.4)]
-        pose["paws"] = [ellipse(px, py, 2.9, 2.4), pose["paws"][1]]
-    if slap == 3:
-        pose["legs"] = []
-        pose["paws"] = [ellipse(cx - 4.5, 43.6, 3, 2), pose["paws"][1]]
-        pose["eyes"] = [(x - 1, y + 0.5) for x, y in eyes]  # watching it fall
+
+
+def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=0):  # noqa: PLR0913
+    pose = cat_face(28, 22, closed=closed or bool(groom) or yawn)
+    sway = 3 * math.sin(tail * math.pi / 4)
+    pose.update(
+        tail=curve(((35, 42), (50 + sway, 45), (48 + sway, 28), (43, 31)), 2.5),
+        body=ellipse(28, 35.5, 10.5, 9.4),
+        paws=[ellipse(23, 44, 3.2, 1.8), ellipse(33, 44, 3.2, 1.8)],
+        scarf=poly((20, 31), (36, 31), (30, 37)),
+    )
+    pose["light"].insert(0, ellipse(28, 38, 6.5, 5.3))
+    pose["patches"].append((ellipse(21, 36, 5, 5), CALICO_ORANGE))
     if groom:
-        pose["paws"] = [pose["paws"][0], ellipse(cx + 3, hy + 6 - groom, 2.8, 3.4)]
+        pose["legs"] = [capsule(33, 40, 34, 28 - groom, 2.3)]
+        pose["paws"][1] = ellipse(34, 28 - groom, 2.8, 2.4)
+    if slap in (1, 2):
+        px, py = (18, 29) if slap == 1 else (9, 35)
+        pose["legs"] = [capsule(22, 36, px, py, 2.5)]
+        pose["paws"][0] = ellipse(px, py, 3.2, 2.2)
     if yawn:
-        pose["mouth"] = ellipse(cx, hy + 6.6, 2.2, 2.6)
+        pose["mouth"] = ellipse(28, 28, 2.2, 2.8)
     return pose
 
 
 def cat_hiss():
-    """Ears flat, eyes wide, mouth open."""
-    cx, hy = 30, 17
     pose = cat_sit()
     pose["ears"] = [
-        poly((cx - 9.5, hy - 1), (cx - 15, hy - 6), (cx - 5, hy - 7.5)),
-        poly((cx + 5, hy - 7.5), (cx + 15, hy - 6), (cx + 9.5, hy - 1)),
+        poly((16, 20), (11, 12), (23, 14)),
+        poly((33, 14), (45, 12), (40, 20)),
     ]
     pose["inner"] = []
-    pose["mouth"] = ellipse(cx, hy + 6.6, 2.2, 2.6)
+    pose["mouth"] = ellipse(28, 28, 2, 2.5)
     return pose
 
 
 def cat_walk(step):
-    """Walking to the right, seen from the side and a little above: the legs on
-    its far side are a shade darker, behind its body."""
-    cx, swing, tip = 25, (3, 1, -3, -1)[step], (0, 1, 2, 1)[step]
-    return {
-        "tail": path(((cx - 12, 28), (cx - 17, 24), (cx - 18.5, 17 + tip), (cx - 16, 11)), 2.4),
-        "far": [
-            capsule(cx - 6, 32, cx - 6 - swing, 44.5, 2.1),
-            capsule(cx + 9, 32, cx + 9 + swing, 44.5, 2.1),
-        ],
-        "legs": [
-            capsule(cx - 9, 33, cx - 9 + swing, 45.5, 2.3),
-            capsule(cx + 7, 33, cx + 7 - swing, 45.5, 2.3),
-        ],
-        "body": capsule(cx - 10, 29.5, cx + 9, 28.5, 7.6),
-        "head": ellipse(cx + 15.5, 22.5, 7.6, 7),
-        "ears": [
-            poly((cx + 9.6, 19), (cx + 10.6, 10.5), (cx + 15, 16)),
-            poly((cx + 16.4, 15.6), (cx + 21.4, 9.8), (cx + 22.6, 17.5)),
-        ],
-        "inner": [poly((cx + 18, 15.8), (cx + 21, 12), (cx + 21.6, 16.4))],
-        "light": [ellipse(cx - 0.5, 34.8, 8, 2.2), ellipse(cx + 20, 25.2, 3.2, 2.4)],
-        "paws": [
-            ellipse(cx - 9 + swing, 46, 2.6, 1.5),
-            ellipse(cx + 7 - swing, 46, 2.6, 1.5),
-        ],
-        "nose": circle(cx + 22.8, 23.8, 0.95),
-        "eyes": [(cx + 18.2, 21.5)],
-        "eye": 1.0,
-        "stripes": [
-            *(capsule(x, 21.6, x + 0.5, 26.6, 0.95) for x in (cx - 7, cx - 2, cx + 3)),
-            capsule(cx + 15, 16.2, cx + 15.4, 19, 0.7),
-        ],
-        "patches": [
-            (ellipse(cx - 6, 27, 6, 5), CALICO_ORANGE),
-            (ellipse(cx + 15, 18.5, 4, 3), None),
-        ],
-    }
-
-
-def cat_crouch():
-    """Low on its haunches, about to spring."""
-    cx, hy = 30, 22
-    pose = cat_sit()
+    phase = step * math.pi / 4
+    swing = 4 * math.cos(phase)
+    lift = 3 * max(0, math.sin(phase))
+    other = 3 * max(0, -math.sin(phase))
+    pose = cat_face(42, 25, side=True)
     pose.update(
-        tail=path(((cx + 9, 43), (cx + 14, 41.5), (cx + 16.5, 37), (cx + 15.5, 32)), 2.4),
-        body=ellipse(cx, 36.5, 12.5, 8.6),
-        head=ellipse(cx, hy, 10, 9.3),
-        ears=[
-            poly((cx - 9.5, hy - 2), (cx - 8.5, hy - 11.5), (cx - 2.5, hy - 8.5)),
-            poly((cx + 2.5, hy - 8.5), (cx + 8.5, hy - 11.5), (cx + 9.5, hy - 2)),
+        tail=curve(((15, 33), (1, 34), (3, 14), (10, 19 + math.sin(phase))), 2.5),
+        body=capsule(17, 33, 33, 32, 8),
+        far=[capsule(18, 35, 18 - swing, 44 - other, 2), capsule(33, 35, 33 + swing, 44 - lift, 2)],
+        legs=[
+            path(((17, 35), (15, 40), (16 + swing, 44 - lift)), 2.3),
+            path(((32, 35), (34, 40), (34 - swing, 44 - other)), 2.3),
         ],
-        inner=[
-            poly((cx - 8, hy - 4), (cx - 7.6, hy - 9.2), (cx - 4, hy - 8)),
-            poly((cx + 4, hy - 8), (cx + 7.6, hy - 9.2), (cx + 8, hy - 4)),
-        ],
-        light=[ellipse(cx, 39.5, 5.5, 4), ellipse(cx, hy + 5.2, 3.8, 2.7)],
-        paws=[ellipse(cx - 5, 44.6, 3, 1.8), ellipse(cx + 5, 44.6, 3, 1.8)],
-        nose=poly((cx - 1.4, hy + 3.4), (cx + 1.4, hy + 3.4), (cx, hy + 4.8)),
-        eyes=[(cx - 4, hy + 0.5), (cx + 4, hy + 0.5)],
-        closed=[],
-        stripes=[
-            capsule(cx, hy - 9.4, cx, hy - 6.2, 0.75),
-            capsule(cx - 2.8, hy - 8.8, cx - 2.3, hy - 5.9, 0.7),
-            capsule(cx + 2.8, hy - 8.8, cx + 2.3, hy - 5.9, 0.7),
-            *(capsule(cx + s * 12, y, cx + s * 8, y + 1, 0.8) for s in (-1, 1) for y in (34, 38)),
-        ],
-        patches=[
-            (ellipse(cx - 6, 35, 6, 4.5), CALICO_ORANGE),
-            (ellipse(cx + 5, hy - 4, 5, 4), None),
-            (ellipse(cx + 7, 39, 4.5, 3.5), CALICO_ORANGE),
-        ],
+        paws=[ellipse(16 + swing, 44.5 - lift, 3, 1.5), ellipse(34 - swing, 44.5 - other, 3, 1.5)],
+        scarf=poly((34, 29), (39, 31), (34, 37)),
     )
+    pose["light"].insert(0, ellipse(25, 37.5, 10, 2.6))
+    pose["stripes"] += [capsule(x, 25, x - 1, 29, 0.8) for x in (19, 24, 29)]
+    pose["patches"].append((ellipse(21, 31, 6.5, 6), CALICO_ORANGE))
     return pose
 
 
-def cat_leap(up=True):
-    """Mid-leap, seen from the side like its walk: stretched out, front paws
-    reaching ahead, hind legs pushing off. cat_sprite tilts it nose up, or nose
-    down when it hops back down."""
-    del up  # the tilt happens in cat_sprite
-    cx = 28
-    return {
-        "tail": path(((cx - 12, 25), (cx - 17, 21), (cx - 21, 19), (cx - 23.5, 15.5)), 2.3),
-        "far": [capsule(cx + 7, 28, cx + 18, 33, 2.1), capsule(cx - 8, 29, cx - 19, 36, 2.1)],
-        "legs": [capsule(cx + 6, 29, cx + 19, 30.5, 2.3), capsule(cx - 9, 30, cx - 21, 33, 2.3)],
-        "body": capsule(cx - 11, 26.5, cx + 9, 25, 7),
-        "head": ellipse(cx + 15.5, 19.5, 7.4, 6.8),
-        "ears": [
-            poly((cx + 9.8, 16), (cx + 10.4, 8), (cx + 14.8, 13)),
-            poly((cx + 16.2, 12.8), (cx + 21.2, 7), (cx + 22.4, 14.4)),
-        ],
-        "inner": [poly((cx + 17.8, 12.8), (cx + 20.8, 9.2), (cx + 21.4, 13.4))],
-        "light": [ellipse(cx - 1, 31.5, 8.5, 2), ellipse(cx + 20, 22.2, 3.2, 2.4)],
-        "paws": [
-            ellipse(cx + 20, 30.8, 2.6, 1.7),
-            ellipse(cx - 22.5, 33.4, 2.6, 1.7),
-        ],
-        "nose": circle(cx + 22.6, 20.8, 0.95),
-        "eyes": [(cx + 18, 18.6)],
-        "eye": 1.0,
-        "stripes": [
-            *(capsule(x, 19, x + 0.5, 23.6, 0.95) for x in (cx - 8, cx - 3, cx + 2)),
-            capsule(cx + 15, 13.2, cx + 15.4, 16, 0.7),
-        ],
-        "patches": [
-            (ellipse(cx - 6, 24, 6, 5), CALICO_ORANGE),
-            (ellipse(cx + 15, 15.5, 4, 3), None),
-        ],
-    }
+def cat_crouch():
+    pose = cat_sit()
+    pose["body"] = ellipse(28, 38, 12, 7)
+    # The same face lowers into the shoulders before the spring.
+    face = cat_face(28, 27)
+    for key in ("head", "ears", "inner", "nose", "eyes", "closed", "stripes", "whiskers"):
+        pose[key] = face[key]
+    pose["light"] = [ellipse(28, 40, 7, 4), *face["light"]]
+    pose["patches"] = [*face["patches"], (ellipse(21, 38, 5, 4), CALICO_ORANGE)]
+    pose["scarf"] = poly((21, 35), (35, 35), (29, 40))
+    return pose
+
+
+def cat_leap(up=True, stage=1):
+    del up  # The whole sprite tilts in cat_sprite.
+    reach = (3, 10, 7, 2)[stage]
+    pose = cat_face(42, 23, side=True)
+    pose.update(
+        tail=curve(((15, 31), (8, 30), (3, 25), (4, 20)), 2.5),
+        body=capsule(17, 31, 33, 29, 7.5),
+        far=[capsule(18, 32, 13 - reach, 39, 2), capsule(33, 31, 36 + reach, 36, 2)],
+        legs=[capsule(17, 33, 11 - reach, 36, 2.4), capsule(32, 32, 37 + reach, 32, 2.4)],
+        paws=[ellipse(14 - reach, 36, 3, 1.7), ellipse(38 + reach, 32, 3, 1.7)],
+        scarf=poly((34, 27), (39, 29), (31, 34)),
+    )
+    pose["light"].insert(0, ellipse(25, 35, 10, 2.4))
+    pose["stripes"] += [capsule(x, 23, x - 1, 27, 0.8) for x in (19, 24, 29)]
+    pose["patches"].append((ellipse(21, 29, 6, 5), CALICO_ORANGE))
+    return pose
 
 
 def cat_nap(breath):
-    """Curled up asleep, tail wrapped round, head tucked in."""
-    cx, cy, grow_by = 27, 27, breath * 0.5
-    hx, hy = cx + 8, cy + 2.5
-    tail = [(cx + 14.6 * math.cos(a / 10), cy + 12.4 * math.sin(a / 10)) for a in range(3, 31, 3)]
-    return {
-        "tail": path(tail, 2.5),
-        "body": ellipse(cx, cy, 15.5 + grow_by, 13 + grow_by),
-        "head": ellipse(hx, hy, 7.6, 7),
-        "ears": [
-            poly((hx - 6.6, hy - 2.6), (hx - 4.8, hy - 10), (hx - 0.8, hy - 6)),
-            poly((hx + 1.2, hy - 6.4), (hx + 6.2, hy - 9.6), (hx + 7, hy - 2.4)),
-        ],
-        "inner": [poly((hx - 5.2, hy - 3.6), (hx - 4.4, hy - 8), (hx - 2, hy - 5.6))],
-        "light": [ellipse(hx, hy + 4.2, 3.2, 2.1)],
-        "paws": [ellipse(hx - 5.5, hy + 6.5, 2.8, 1.8), ellipse(hx + 5, hy + 6, 2.6, 1.8)],
-        "nose": circle(hx, hy + 2.6, 0.9),
-        "closed": [
-            path(((x - 1.6, hy), (x, hy + 1), (x + 1.6, hy)), 0.55) for x in (hx - 2.8, hx + 2.8)
-        ],
-        "stripes": [
-            capsule(
-                cx + math.cos(a) * 6,
-                cy + math.sin(a) * 5,
-                cx + math.cos(a) * 14.5,
-                cy + math.sin(a) * 12,
-                1,
-            )
-            for a in (3.2, 3.7, 4.2, 4.7, 5.2)
-        ],
-        "patches": [
-            (ellipse(cx - 6, cy - 4, 7, 6), CALICO_ORANGE),
-            (ellipse(hx, hy - 4, 4, 3.5), None),
-        ],
-    }
+    swell = 0.35 * (1 - math.cos(breath * math.pi / 4))
+    pose = cat_face(35, 33, closed=True)
+    pose.update(
+        tail=curve(((13, 34), (8, 44), (28, 48), (34, 40)), 3.1),
+        body=ellipse(25, 33, 16 + swell, 11 + swell),
+        paws=[ellipse(31, 41, 3.1, 1.8), ellipse(39, 41, 3, 1.8)],
+        front_tail=True,
+    )
+    pose["patches"].append((ellipse(17, 31, 7, 6), CALICO_ORANGE))
+    return pose
 
 
 CAT_POSES = {
@@ -984,13 +1039,15 @@ def cat_sprite(coat, pose_key, flip, k):
     p = CAT_POSES[pose_key[0]](*pose_key[1:])
     img = Img(math.ceil(7 * k), math.ceil(3 * k), k)
     if pose_key[0] == "leap":  # nose up to leap up the table, nose down to hop down
-        img.move(-0.32 if pose_key[1] else 0.32, (28, 26), (0, 0))
+        stage = pose_key[2] if len(pose_key) > 2 else 1
+        tilt = (0.2, 0.32, 0.15, 0.0)[stage]
+        img.move(-tilt if pose_key[1] else tilt, (28, 26), (0, 0))
     dark_fur = sum(fur) < 300
-    edge = (128, 128, 142) if dark_fur else mix(fur, INK, 0.55)
+    edge = (119, 119, 133) if dark_fur else mix(fur, INK, 0.38)
     outer = [p["tail"], p["body"], p["head"], *p["ears"], *p.get("legs", []), *p.get("far", [])]
     silhouette = union(*outer)
     img.fill(grow(union(p["body"], p["head"]), 3.5), INK, 0.22)  # its shadow on the table
-    img.fill(grow(silhouette, 1.1), edge)
+    img.fill(grow(silhouette, 0.7), edge)
     for leg in p.get("far", []):
         img.fill(leg, mix(fur, INK, 0.3))
     for part in (p["tail"], p["body"], *p.get("legs", [])):
@@ -1002,20 +1059,30 @@ def cat_sprite(coat, pose_key, flip, k):
     cat_markings(img, p, pattern, dark, silhouette)
     for part in (*p["light"], *p.get("paws", [])):
         img.fill(part, dark if pattern == "points" and part in p.get("paws", []) else light)
+    cat_details(img, p, fur, edge)
     for part in p["inner"]:
         img.fill(part, PINK)
-    img.fill(p["nose"], PINK)
+    img.fill(p["nose"], (133, 83, 72))
+    for whisker in p.get("whiskers", []):
+        img.fill(whisker, light if dark_fur else (105, 77, 62), 0.8)
     if "mouth" in p:
         img.fill(p["mouth"], (120, 40, 52))
     size = p.get("eye", 1.0)
     for x, y in p.get("eyes", []):
-        img.fill(ellipse(x, y, 1.9 * size, 2.3 * size), eye)
-        img.fill(ellipse(x + 0.1, y + 0.2, 0.85 * size, 1.9 * size), INK)
-        img.fill(circle(x + 0.6 * size, y - 0.8 * size, 0.55 * size), WHITE)
+        img.fill(ellipse(x, y, 1.35 * size, 1.8 * size), eye if dark_fur else INK)
+        img.fill(circle(x - 0.35, y - 0.6, 0.4), WHITE)
     if not p.get("eyes"):
         for lid in p.get("closed", []):
             img.fill(lid, (170, 170, 182) if dark_fur else INK)
     return img.mirror() if flip else img
+
+
+def cat_details(img, pose, fur, edge):
+    if pose.get("front_tail"):
+        img.fill(grow(pose["tail"], 0.6), edge)
+        img.fill(pose["tail"], fur)
+    if "scarf" in pose:
+        img.fill(pose["scarf"], (75, 133, 122))
 
 
 def cat_markings(img, p, pattern, dark, silhouette):
@@ -1227,6 +1294,7 @@ class Cat:
         self.y = self.goal_y = 0.0
         self.leap = None  # where from and to, while it leaps between table and cards
         self.dir, self.last, self.speed = 1, now, 7.0  # cols/s
+        self.distance = 0.0  # the walking cycle follows the paws' distance over the table
         self.plan, self.mode, self.until = [], "nap", now + 4
         self.pets, self.petted_at, self.target = 0, 0.0, None
         self.fed, self.chasing, self.sleepy = [], False, False
@@ -1356,37 +1424,47 @@ class Cat:
             self.mode, self.until = "crouch", now + CROUCH_S
             return False
         if abs(goal - self.x) <= speed * dt:
-            self.x = goal
+            self._stride(goal, abs(goal - self.x))
             return True
         self._stride(goal, speed * dt)
         return False
 
     def _stride(self, goal, step):
+        if step == 0:
+            return
         self.dir = 1 if goal > self.x else -1
         self.x += self.dir * step
+        self.distance += step
 
     def _fly(self, now):
         """Along its leap, easing off and landing softly, then on its way."""
         leap = self.leap
         t = min(1.0, (now - leap["start"]) / leap["time"])
-        ease = t * t * (3 - 2 * t)
         (x0, y0), (x1, y1) = leap["from"], leap["to"]
-        self.x, self.y = x0 + (x1 - x0) * ease, y0 + (y1 - y0) * ease
+        # Lift off quickly, arc above the landing spot, then fall onto the paws.
+        self.x = x0 + (x1 - x0) * t
+        self.y = y0 + (y1 - y0) * t - 1.2 * 4 * t * (1 - t)
         if t >= 1:
             self.mode, self.leap = "walk", None
 
     def pose(self, now):
         """The sprite pose for this moment, and whether to mirror it."""
         mirrored = self.dir < 0
+        flight = self.leap
+        stage = (
+            min(3, max(0, int((now - flight["start"]) / flight["time"] * 4)))
+            if flight and self.mode == "leap"
+            else 0
+        )
         chew = (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False)
         poses = {
-            "walk": (("walk", int(now * 8) % 4), mirrored),
+            "walk": (("walk", int(self.distance / 0.8) % 8), mirrored),
             "crouch": (("crouch",), False),
-            "leap": (("leap", bool(self.leap and self.leap["up"])), mirrored),
-            "nap": (("nap", int(now / 1.2) % 2), mirrored),
+            "leap": (("leap", bool(flight and flight["up"]), stage), mirrored),
+            "nap": (("nap", int(now * 2) % 8), mirrored),
             "groom": (("groom", 1 + int(now * 3) % 2), False),
             "yawn": (("yawn",), False),
-            "purr": (("sit", int(now * 4) % 3, True), False),
+            "purr": (("sit", int(now * 4) % 8, True), False),
             "eat": chew,
             "nibble": chew,
             "hiss": (("hiss",), False),
@@ -1395,7 +1473,7 @@ class Cat:
                 False,
             ),
         }
-        return poses.get(self.mode, (("sit", int(now * 1.5) % 3, now % 5 < 0.25), False))
+        return poses.get(self.mode, (("sit", int(now * 1.5) % 8, now % 5 < 0.25), False))
 
     def place(self, frame, art, top, k, now):
         """Put the cat's picture in `frame`, and its zZ in the strip's text `art` rows."""
@@ -1515,20 +1593,7 @@ def card_lines(state, pid, now, width):
     """A card's three lines: name and project, status, and a note."""
     leaving = pid in state["leaving"]
     cup = state["leaving"][pid] if leaving else state["live"][pid]
-    kind, source = cup[:2]
-    style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
-    name, color, _ = DRINKS[style_kind]
-    app = is_app(cup)
-    if kind == COPILOT_SESSION_KIND:
-        name, where = "Agent", source
-    elif app:
-        where = "app"
-    else:
-        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
-    name = trim(name, width)
-    title = f"{color}{BOLD}{name}{RESET}"
-    if width - len(name) > 2:
-        title += f" {DIM}{trim(where, width - len(name) - 1)}{RESET}"
+    title, app = card_title(state, pid, cup, width), is_app(cup)
     if leaving:
         ended, started = cup[2], cup[3]
         done = "closed" if app else "served"
@@ -1546,15 +1611,40 @@ def card_lines(state, pid, now, width):
         "idle": f"{DIM}idle {took}{RESET}",
         "cold": f"{COLD}cold{RESET} {DIM}{took}{RESET}",
     }[word]
+    return [title, status, card_note(state, pid, cup, word, since)]
+
+
+def card_title(state, pid, cup, width):
+    """A card's first line: the agent or app, then its project, title or "app"."""
+    kind, source = cup[:2]
+    name, color, _ = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind]
     if kind == COPILOT_SESSION_KIND:
-        note = f"{DIM}Copilot app{RESET}"
-    elif word == "ready":
-        note = f"{GOLD}waiting for you{RESET}"
-    elif word == "brewing":
-        note = f"{DIM}{cup[3]:.0f}% cpu{RESET}"
+        name, where = "Agent", source
+    elif str(pid).startswith("t3:"):
+        where = source  # a T3 Code session's title
+    elif is_app(cup):
+        where = "app"
     else:
-        note = f"{DIM}quiet since {time.strftime('%H:%M', time.localtime(since))}{RESET}"
-    return [title, status, note]
+        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+    name = trim(name, width)
+    title = f"{color}{BOLD}{name}{RESET}"
+    if width - len(name) > 2:
+        title += f" {DIM}{trim(where, width - len(name) - 1)}{RESET}"
+    return title
+
+
+def card_note(state, pid, cup, word, since):
+    """A card's last line: what its app says it's doing, or what the bar can tell."""
+    told = state.get("told", {}).get(pid)
+    if cup[0] == COPILOT_SESSION_KIND:
+        return f"{DIM}Copilot app{RESET}"
+    if told:
+        return f"{GOLD if word == 'ready' else DIM}{told[2]}{RESET}"
+    if word == "ready":
+        return f"{GOLD}waiting for you{RESET}"
+    if word == "brewing":
+        return f"{DIM}{cup[3]:.0f}% cpu{RESET}"
+    return f"{DIM}quiet since {time.strftime('%H:%M', time.localtime(since))}{RESET}"
 
 
 def runs(cells):
@@ -1947,7 +2037,16 @@ def update(state):
             if record[0] == COPILOT_SESSION_KIND
         }
     live.update(sessions)
+    told = {}
+    if any(session[0] == "t3" and is_app(session) for session in live.values()):
+        t3 = scan_t3_sessions(now)
+        if t3 is None:  # couldn't read them this time: keep what we had
+            keep = {p: r for p, r in state["live"].items() if str(p).startswith("t3:")}
+            t3 = keep, {p: state.get("told", {})[p] for p in keep if p in state.get("told", {})}
+        live.update(t3[0])
+        told = t3[1]
     take_orders(state, live, now)
+    state["told"] = told
     state["live"] = live
     state["initialized"] = True
     track_activity(state, live, now)
@@ -1965,9 +2064,9 @@ def take_orders(state, live, now):
     run a tab, which they settle when they close."""
     fresh = live.keys() - state["live"].keys()
     projects = state.setdefault("projects", {})
-    terminal = [p for p in fresh if not is_app(live[p]) and live[p][0] != COPILOT_SESSION_KIND]
+    terminal = [p for p in fresh if isinstance(p, int)]  # sessions in a terminal
     projects.update((p, project_name(path)) for p, path in scan_cwds(terminal).items())
-    for pid in fresh:
+    for pid in sorted(fresh, key=lambda p: not is_app(live[p])):  # an order beats its app
         state["first_seen"][pid] = now
         if not state["initialized"]:
             continue
@@ -1975,6 +2074,8 @@ def take_orders(state, live, now):
         kind, source = live[pid][:2]
         if kind == COPILOT_SESSION_KIND:
             message = f"New session: {source} ☕"
+        elif str(pid).startswith("t3:"):
+            message = f"New order: {DRINKS[kind][0]} in T3 Code ☕"
         elif is_app(live[pid]):
             message = f"{DRINKS[kind][0]} opened a tab ☕"
         else:
@@ -1984,7 +2085,8 @@ def take_orders(state, live, now):
     for pid in state["live"].keys() - live.keys():
         kind, tty_name, started, _, _ = state["live"][pid]
         state["first_seen"].pop(pid, None)
-        if kind == COPILOT_SESSION_KIND:
+        forgotten = state.get("words", {}).get(pid) == "cold" and str(pid).startswith("t3:")
+        if kind == COPILOT_SESSION_KIND or forgotten:  # it just leaves, unserved
             if state["cat"].target == pid:
                 state["cat"].target = None
             continue

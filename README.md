@@ -10,13 +10,13 @@ after them.
 - **Battery aware.** Unplugged at 20% or less, the display may sleep while the
   system stays awake, so your agents keep running. Plug in and the display
   stays on again. The frame's top edge shows the charge while you're on battery.
-- **A table of orders, seen from above.** Every Copilot CLI, Codex CLI, Claude
-  Code, Pi and OpenCode session running in a terminal is a card: a cup on its
-  saucer in the agent's colour, the project folder it runs in, what it's doing
-  and for how long.
+- **A table of orders.** Every Copilot CLI, Codex CLI, Claude Code, Pi and
+  OpenCode session running in a terminal is a card: a coffee cup on its saucer,
+  banded in the agent's colour, then the project folder it runs in, what it's
+  doing and for how long.
 - **The coffee shows the state.**
-  - **Brewing:** the crema swirls as it's stirred, faster when the agent works
-    harder.
+  - **Brewing:** it steams, and the foam swirls as it's stirred, faster when the
+    agent works harder.
   - **Ready:** a heart in the foam and a biscuit on the saucer. The session
     worked and then went quiet, so it's probably waiting for you. Ready orders
     come first.
@@ -30,17 +30,23 @@ after them.
 - **Copilot app sessions.** Running local Copilot app sessions and chats get
   their own cards, labelled `Agent` with the session's title. They brew while
   running; idle sessions disappear without being served.
-- **Lattes for open apps.** The Codex, Copilot, Claude and VS Code apps each
-  get a latte, after the sessions: a tall glass on a coaster in the app's
-  colour, with its CPU and RAM, counting everything the app runs. The foam swirls while the app is busy. Opening an app pours its
+- **T3 Code sessions, without guessing.** While T3 Code is open, each of its
+  sessions gets a card in its agent's colour, with the session's title. T3 Code
+  records what its sessions are doing, so these cards say exactly that:
+  brewing while a run goes on, then ready, waiting for you, needing your
+  approval, or with a failed run. A session quiet for an hour leaves the table.
+- **Lattes for open apps.** The Codex, Copilot, Claude, VS Code and T3 Code
+  apps each get a latte, after the sessions: layered coffee in a tall glass on a
+  coaster in the app's colour, with its CPU and RAM, counting everything the
+  app runs. The foam swirls while the app is busy. Opening an app pours its
   latte in; closing it settles its tab, and the cat knocks the empty glass off
   the table. Apps don't count as orders.
-- **At a glance.** The frame's top edge and the terminal tab's title count what's ready,
-  brewing, idle and just served, such as `☕ 1 ready · 2 brewing`, so you can
-  keep an eye on your agents from another tab.
+- **At a glance.** The frame's top edge and the terminal tab's title count
+  what's ready, brewing, idle and just served, such as `☕ 1 ready · 2 brewing`,
+  so you can keep an eye on your agents from another tab.
 - **A barista cat.** A random name and coat each launch. It lives on the strip
   of table below the cards: it walks about, grooms, yawns and naps when things
-  are quiet. It climbs up to sniff each new order and to check on ready ones,
+  are quiet. It leaps up to sniff each new order and to check on ready ones,
   and while an order is ready it sits up and looks at you instead of napping.
   It knocks every finished cup off the table, and if you leave a ready order
   until it goes cold, it eats the biscuit.
@@ -105,15 +111,17 @@ including Copilot session tracking and app resource reporting.
 ## How it works
 
 - Every 3 seconds, `ps` is checked for `copilot`, `codex`, `claude`, `pi` and
-  `opencode` processes attached to a terminal, and for the Codex, Copilot, Claude and
-  VS Code apps. An app's helpers and agent backends count towards the app. A
+  `opencode` processes attached to a terminal, and for the Codex, Copilot,
+  Claude, VS Code and T3 Code apps. An app's helpers and agent backends count
+  towards the app; agents in VS Code's and T3 Code's terminals keep cards of
+  their own. A
   terminal session's processes count towards its card, except another agent
   session started inside it, which gets its own card.
 - When a terminal session first appears, `lsof` reads its working directory
   once, for the project name.
-- "Ready" is a guess from CPU use: a session that worked for at least 15
-  seconds and then went quiet for 30. An agent waiting on a very slow model
-  reply can look ready early.
+- For terminal sessions, "ready" is a guess from CPU use: a session that worked
+  for at least 15 seconds and then went quiet for 30. An agent waiting on a very
+  slow model reply can look ready early. T3 Code sessions need no guess.
 - OpenCode runs its tools in a shared background server, so an OpenCode card
   only counts the work its terminal does.
 - Copilot's local, running, unarchived project, agent and general-chat sessions
@@ -121,6 +129,9 @@ including Copilot session tracking and app resource reporting.
   is read, never conversation history. This optional integration uses an
   undocumented schema; if a read fails, existing session cards are kept until
   the next successful read.
+- While T3 Code is open, its open sessions and their latest runs and pending
+  approvals are read the same way, from `~/.t3/userdata/statev2.sqlite`: titles
+  and statuses only, never messages.
 - `caffeinate` is tied to caffe's process ID, so the Mac can sleep again as soon
   as caffe exits, even if it's killed.
 - Every 30 seconds, `pmset -g batt` is read. On a low battery caffe restarts

@@ -26,6 +26,39 @@ def bar(**changes):
 
 
 class CatCleanupTests(unittest.TestCase):
+    def test_walking_paws_follow_distance_instead_of_time(self):
+        cat = caffe["Cat"](0, 10)
+        cat.go(30)
+        still = cat.pose(0)
+        self.assertEqual(cat.pose(0.4), still)  # no sliding paws without movement
+        cat.step(0.2, 80, False, 5)
+        self.assertNotEqual(cat.pose(0.2), still)
+        # Walking the same distance at a different speed gives the same stance.
+        fast = caffe["Cat"](0, 10)
+        fast.speed = cat.speed * 2
+        fast.go(30)
+        fast.step(0.1, 80, False, 5)
+        self.assertEqual(cat.pose(0.2), fast.pose(0.1))
+
+    def test_leaps_arc_above_the_path_and_land_on_target(self):
+        for start, end in ((0, -3), (-3, 0)):
+            cat = caffe["Cat"](0, 10)
+            cat.y, cat.mode = start, "leap"
+            cat.leap = {
+                "from": (10, start),
+                "to": (10, end),
+                "start": 0,
+                "time": 1,
+                "up": end < start,
+            }
+            launch = cat.pose(0)
+            cat.step(0.5, 80, False, 5)
+            self.assertLess(cat.y, (start + end) / 2)
+            self.assertNotEqual(cat.pose(0.5), launch)
+            cat.step(1, 80, False, 5)
+            self.assertEqual((cat.x, cat.y), (10, end))
+            self.assertIsNone(cat.leap)
+
     def test_the_cat_climbs_to_a_finished_cup_and_knocks_it_off(self):
         state = bar(leaving={1: ("codex", "ttys001", 0, -10)}, visit=1)
         climbed = False
