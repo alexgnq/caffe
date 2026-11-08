@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""caffe: keep the Mac awake, with a coffee bar of your running agent sessions.
+"""caffe: keep the Mac awake, with a café table of your running agent sessions.
 
 Every interactive Copilot CLI / Codex CLI / Claude Code / Pi / OpenCode session
-gets an espresso, labelled with its project and whether it's brewing, idle or
-gone cold. Each supported desktop application gets a latte named after the app.
-Busy agents steam harder. When a session ends, its cup drains and
-leaves the counter. A barista cat wanders behind the cups, checks on new and
-finished ones, chases the odd mouse, and naps when the bar is quiet. Stray
-cats drop by now and then, and at 14:30 there's fika.
+gets a card: a cup seen from above, its project, and what it's doing. Brewing
+coffee swirls as it's stirred; a session that finished its turn is ready, with
+a biscuit on the saucer; one left alone goes cold. Ready orders come first.
+When a session ends, its cup drains and the barista cat knocks it off the
+table. The cat also sniffs new orders, chases the odd mouse, and naps when the
+bar is quiet. Stray cats drop by now and then, and at 14:30 there's fika.
 
 On battery at 20% or less, the display may sleep; agents keep running.
 
-App lattes show total CPU and RAM. Running local Copilot app sessions and chats
-also get individual espressos labeled "Agent"; idle ones are hidden.
+Open apps are listed with their CPU and RAM. Running local Copilot app sessions
+and chats also get cards labelled "Agent"; idle ones are hidden.
 
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
-kitty, WezTerm or a recent iTerm2. Other terminals get the bar without pictures.
+kitty, WezTerm or a recent iTerm2. Other terminals get the cards without pictures.
 Press p to pet the cat, f to feed it a treat, and q (or Ctrl-C) to close the bar
 and get your receipt.
 
@@ -46,7 +46,7 @@ def c256(n):
     return f"\033[38;5;{n}m"
 
 
-# kind: (name, label color, mug glaze)
+# kind: (name, label color, cup glaze)
 AGENTS = {
     "copilot": ("Copilot", c256(141), (167, 139, 250)),
     "codex": ("Codex", c256(75), (86, 160, 245)),
@@ -59,16 +59,16 @@ COPILOT_SESSION_KIND = "copilot-session"
 COPILOT_SESSION_DB = Path.home() / ".copilot" / "data.db"
 SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
-GOLD, WOOD = c256(220), c256(94)
+GOLD = c256(220)
 POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S = 3.0, 0.12, 0.5, 2.0
 DRAIN_S, SERVED_S = 3.0, 15.0  # finished cups the cat can't reach leave on their own
 BUSY_CPU, WORKING_CPU = 25.0, 3.0
-BUSY_RAM_MB, WORKING_RAM_MB = 1024.0, 256.0
 IDLE_AFTER_S, COLD_S = 30.0, 15 * 60  # a session this quiet is idle; this long, its cup is cold
+MIN_TURN_S = 15.0  # work this long, then quiet, and a session is ready for you
 RUSH_AT = 4  # agents working at once
 LOW_BATTERY, BATTERY_POLL_S = 20, 30.0  # % at which the display may sleep
 MOUSE_ODDS, GUEST_ODDS = 1 / 100, 1 / 300  # per poll: a mouse every ~5 min, a guest every ~15
-CHASE_SPEED, TREATS_PER_10_MIN = 15.0, 3
+CHASE_SPEED, ERRAND_SPEED, TREATS_PER_10_MIN = 15.0, 11.0, 3
 NIBBLE_ODDS, BUN_BITES = 1 / 120, 4  # per poll at fika: a bite every ~6 min, gone in four
 BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss")  # the cat finishes these first
 
@@ -85,9 +85,9 @@ QUIPS = [
     "Frothing the context window.",
 ]
 IDLE_QUIPS = [
-    "No orders. The barista polishes an empty cup.",
-    "Quiet bar. Start an agent and I'll pour.",
-    "Counter's clean. Mac's still awake, as you asked.",
+    "The barista polishes an empty cup.",
+    "Start an agent and I'll pour.",
+    "The table's clean. Mac's still awake, as you asked.",
 ]
 DAY_QUIPS = {
     "night": [
@@ -105,7 +105,7 @@ DAY_QUIPS = {
 GREETINGS = {
     "morning": "Good morning! {} opens the bar.",
     "night": "{} takes the night shift.",
-    "fika": "{} is on shift, with a fresh {bun} on the counter.",
+    "fika": "{} is on shift, with a fresh {bun} on the table.",
 }
 
 
@@ -338,24 +338,15 @@ def fmt_mem(mb):
     return f"{mb / 1024:.1f}G" if mb >= 1024 else f"{mb:.0f}M"
 
 
-def app_steam_level(cpu, ram_mb):
-    """Map app CPU and resident memory use to the three steam levels."""
-    if cpu >= BUSY_CPU or ram_mb >= BUSY_RAM_MB:
-        return 2
-    if cpu >= WORKING_CPU or ram_mb >= WORKING_RAM_MB:
-        return 1
-    return 0
-
-
 def is_working(session):
-    kind, source, _, cpu, ram_mb = session
-    if kind == COPILOT_SESSION_KIND:
-        return True
-    return bool(app_steam_level(cpu, ram_mb)) if source.startswith("app:") else cpu >= WORKING_CPU
+    """Whether a session is using the CPU right now. Copilot app sessions are
+    only listed while they run."""
+    kind, _, _, cpu, _ = session
+    return kind == COPILOT_SESSION_KIND or cpu >= WORKING_CPU
 
 
 def is_app(session):
-    """An open application's latte, rather than an agent session's espresso."""
+    """An open application, listed below the cards, rather than a session with a cup."""
     return session[0] != COPILOT_SESSION_KIND and session[1].startswith("app:")
 
 
@@ -375,14 +366,19 @@ def track_activity(state, live, now):
 
 
 def session_state(state, pid, now):
-    """("brewing" | "idle" | "cold", since when) for a session. Agents use
-    little CPU while they wait on the model, so a session keeps brewing until
-    it has been quiet for IDLE_AFTER_S."""
+    """("brewing" | "ready" | "idle" | "cold", since when) for a session. Agents
+    use little CPU while they wait on the model, so a session keeps brewing
+    until it has been quiet for IDLE_AFTER_S. Quiet after a real spell of work,
+    it's most likely waiting for you: ready. Quiet without one, it's idle."""
     brew_start, last_active = state.get("activity", {}).get(pid, (None, None))
     if last_active is not None and now - last_active < IDLE_AFTER_S:
         return "brewing", brew_start
     since = last_active or state["first_seen"].get(pid, now)
-    return ("cold" if now - since >= COLD_S else "idle"), since
+    if now - since >= COLD_S:
+        return "cold", since
+    if last_active is not None and last_active - brew_start >= MIN_TURN_S:
+        return "ready", since
+    return "idle", since
 
 
 def brewable(state):
@@ -390,16 +386,21 @@ def brewable(state):
     return [pid for pid, session in state["live"].items() if not is_app(session)]
 
 
-def tally(state, now):
-    """What the bar is doing, such as "2 brewing · 1 idle · 1 served"."""
-    counts = dict.fromkeys(("brewing", "idle", "served"), 0)
+def tally_counts(state, now):
+    """How many sessions are ready, brewing, idle (or cold) and just served."""
+    counts = dict.fromkeys(("ready", "brewing", "idle", "served"), 0)
     for pid in brewable(state):
         word = session_state(state, pid, now)[0]
         counts["idle" if word == "cold" else word] += 1
     for pid, cup in state["leaving"].items():
         if not is_app(cup) and not gone(state, pid, now):
             counts["served"] += 1
-    return " · ".join(f"{n} {word}" for word, n in counts.items() if n)
+    return counts
+
+
+def tally(state, now):
+    """What the bar is doing, such as "1 ready · 2 brewing · 1 idle"."""
+    return " · ".join(f"{n} {word}" for word, n in tally_counts(state, now).items() if n)
 
 
 def fmt_dur(sec):
@@ -522,28 +523,28 @@ class Img:
         self.cols, self.rows, self.k = cols, rows, k
         self.w, self.h = cols * CW * PX, rows * CH * PX
         self.buf = bytearray(self.w * self.h * 4)
-        self.moved = None
+        self.moved, self.fade = None, 1.0
 
-    def move(self, angle, pivot, shift):
-        """Draw what follows turned by `angle` around `pivot`, then shifted."""
+    def move(self, angle, pivot, shift, scale=1.0):
+        """Draw what follows turned by `angle` around `pivot`, scaled, then shifted."""
         ca, sa, (px, py), (dx, dy) = math.cos(angle), math.sin(angle), pivot, shift
 
         def back(x, y):  # from the image to where the shape was drawn
-            x, y = x - dx - px, y - dy - py
+            x, y = (x - dx - px) / scale, (y - dy - py) / scale
             return ca * x + sa * y + px, -sa * x + ca * y + py
 
         def there(x, y):
             x, y = x - px, y - py
-            return ca * x - sa * y + px + dx, sa * x + ca * y + py + dy
+            return (ca * x - sa * y) * scale + px + dx, (sa * x + ca * y) * scale + py + dy
 
-        self.moved = back, there
+        self.moved = back, there, scale
 
     def fill(self, shape, color, alpha=1.0):
         """Paint a shape. `color` and `alpha` may also be functions of (x, y)."""
         if self.moved:
             shape, color, alpha = self._moved(shape, color, alpha)
         dist, (x0, y0, x1, y1) = shape
-        s, buf, w = PX * self.k, self.buf, self.w
+        s, buf, w, fade = PX * self.k, self.buf, self.w, self.fade
         for py in range(max(0, int(y0 * s) - 1), min(self.h, math.ceil(y1 * s) + 1)):
             y = (py + 0.5) / s
             for px in range(max(0, int(x0 * s) - 1), min(w, math.ceil(x1 * s) + 1)):
@@ -551,7 +552,7 @@ class Img:
                 a = min(1.0, 0.5 - dist(x, y) * s)
                 if a <= 0:
                     continue
-                a *= alpha(x, y) if callable(alpha) else alpha
+                a *= (alpha(x, y) if callable(alpha) else alpha) * fade
                 if a <= 0.004:  # (also keeps a fully faded shape off empty pixels)
                     continue
                 rgb = color(x, y) if callable(color) else color
@@ -564,7 +565,7 @@ class Img:
                 buf[i + 3] = round(total * 255)
 
     def _moved(self, shape, color, alpha):
-        back, there = self.moved
+        back, there, scale = self.moved
         (dist, (x0, y0, x1, y1)) = shape
         corners = [there(x, y) for x in (x0, x1) for y in (y0, y1)]
         xs, ys = [c[0] for c in corners], [c[1] for c in corners]
@@ -572,7 +573,10 @@ class Img:
         def undo(f):
             return (lambda x, y: f(*back(x, y))) if callable(f) else f
 
-        return (undo(dist), (min(xs), min(ys), max(xs), max(ys))), undo(color), undo(alpha)
+        def moved_dist(x, y):  # distances shrink and grow with the shape
+            return dist(*back(x, y)) * scale
+
+        return (moved_dist, (min(xs), min(ys), max(xs), max(ys))), undo(color), undo(alpha)
 
     def mirror(self):
         row = self.w * 4
@@ -583,163 +587,105 @@ class Img:
         return self
 
 
-DRINK_RIMS = {"espresso": 24, "latte": 7}
-WOBBLE = (0.055, -0.04, 0.025, -0.01, 0.0)
+# ---- Cups, seen from above on their saucers. A cup is 6 cols x 3 rows: a
+# 48-unit square, so circles stay round. Brewing coffee swirls as it's stirred,
+# finished coffee gets latte art, a ready order a biscuit, cold coffee a skin.
+SAUCER, SAUCER_RING = (238, 233, 224), (222, 215, 203)
+CREMA, CREMA_EDGE, COFFEE, FOAM = (200, 146, 92), (158, 102, 58), (58, 34, 22), (248, 238, 220)
+BISCUIT = (214, 160, 96)
+CUP_X, CUP_Y = 22, 24  # the middle of the cup in its picture
+STIR_FRAMES, POUR_FRAMES = 16, 6
+LOOKS = ("brewing", "idle", "ready", "cold", "pour", "drain", "empty")
 
 
-def mug_sprite(glaze, fill, k, style=("espresso", 0), wobble=4):
-    """A drink in an agent's colour, with a stable foam pattern."""
+def ring(cx, cy, r, width):
+    """A circle's outline, `width` thick."""
+    reach = r + width
+    return (
+        lambda x, y: abs(math.hypot(x - cx, y - cy) - r) - width / 2,
+        (cx - reach, cy - reach, cx + reach, cy + reach),
+    )
+
+
+def latte_heart(cx, cy, s):
+    return union(
+        circle(cx - 0.9 * s, cy - 0.3 * s, s),
+        circle(cx + 0.9 * s, cy - 0.3 * s, s),
+        poly((cx - 1.85 * s, cy + 0.05 * s), (cx + 1.85 * s, cy + 0.05 * s), (cx, cy + 2.1 * s)),
+    )
+
+
+def cup_sprite(glaze, look, frame=0, k=1.0):
+    """A cup in the agent's colour, as `look` (one of LOOKS) at animation `frame`."""
     img = Img(math.ceil(6 * k), math.ceil(3 * k), k)
-    img.fill(ellipse(21, 46.6, 17, 1.6), INK, 0.35)  # shadow on the counter
-    img.move(WOBBLE[wobble], (21, 46), (0, 0))
-    draw_drink(img, glaze, fill, style)
+    draw_cup(img, glaze, look, frame)
     return img
+
+
+def draw_cup(img, glaze, look, frame):
+    cx, cy = CUP_X, CUP_Y
+    img.fill(circle(cx + 1.6, cy + 2.2, 20.5), INK, 0.35)  # its shadow on the table
+    img.fill(circle(cx, cy, 20), SAUCER)
+    img.fill(ring(cx, cy, 15.5, 0.8), SAUCER_RING)
+    img.fill(capsule(cx + 11, cy + 7, cx + 18.5, cy + 12.5, 2.6), mix(glaze, INK, 0.15))
+    img.fill(circle(cx + 1, cy + 1.4, 13.2), INK, 0.25)
+    img.fill(circle(cx, cy, 13), glaze)
+    img.fill(ring(cx, cy, 12.2, 1.2), mix(glaze, WHITE, 0.35))
+    inside = circle(cx, cy, 10.4)
+    if look == "empty" or (look == "drain" and frame >= 2):
+        img.fill(inside, mix(SAUCER, glaze, 0.12))
+        img.fill(ring(cx + 1, cy + 1, 6.5, 1.2), (150, 110, 80), 0.35)  # the stain left behind
+        return
+    if look == "cold":
+        img.fill(inside, COFFEE)
+        img.fill(ring(cx, cy, 9.6, 1.2), (96, 64, 44))
+        img.fill(ellipse(cx - 3, cy - 3, 3.5, 2), (120, 86, 62), 0.35)  # a skin on the coffee
+        return
+    if look in ("pour", "drain"):
+        img.fill(inside, mix(SAUCER, glaze, 0.12))
+        r = 10.4 * ((frame + 1) / POUR_FRAMES if look == "pour" else 0.6)
+        img.fill(
+            circle(cx, cy, r), CREMA if look == "drain" or frame >= POUR_FRAMES - 2 else COFFEE
+        )
+        if look == "pour":  # the stream lands in the middle
+            img.fill(circle(cx, cy, 1.6), (104, 62, 38))
+        return
+    img.fill(inside, CREMA)
+    img.fill(ring(cx, cy, 9.8, 1.4), CREMA_EDGE, 0.8)
+    if look == "brewing":
+        turn = frame / STIR_FRAMES * 2 * math.pi
+        for arm in (0, math.pi):  # a swirl of foam, turning as the coffee is stirred
+            pts = [
+                (cx + math.cos(turn + arm + t * 0.55) * r, cy + math.sin(turn + arm + t * 0.55) * r)
+                for t, r in ((t, 1.2 + t * 0.95) for t in range(9))
+            ]
+            img.fill(path(pts, 0.9), FOAM, 0.85)
+        return
+    img.fill(latte_heart(cx, cy - 1.2, 2.8), FOAM)
+    if look == "ready":  # served with a biscuit on the saucer
+        img.fill(capsule(cx - 15.5, cy + 10, cx - 9, cy + 15.5, 2.6), BISCUIT)
+        for t in (0.3, 0.6):
+            img.fill(circle(cx - 15.5 + 6.5 * t, cy + 10 + 5.5 * t, 0.6), (170, 116, 62))
 
 
 KNOCK_FRAMES, KNOCK_S = 12, 1.0
 
 
-def knock_sprite(glaze, frame, k, style=("espresso", 0)):
-    """A mug the cat swatted: it tips over and drops behind the bar. The picture
-    is bigger than a mug (4 cols to the left, 1 row up) and ends at the counter,
-    so the falling mug disappears behind it."""
-    img = Img(math.ceil(10 * k), math.ceil(4 * k), k)
+def knock_sprite(glaze, frame, k=1.0):
+    """A cup the cat pushed: it slides off to the left, spins, and drops off the
+    table. The picture is 4 cols wider than a cup, which starts at its right."""
+    img = Img(math.ceil(10 * k), math.ceil(3 * k), k)
     t = frame / KNOCK_FRAMES
-    angle = 0.12 * math.sin(t / 0.2 * math.pi) if t < 0.2 else -(t - 0.2) * 2
-    left, up = round(4 * k) * CW / k - 12 * t, (img.rows - math.ceil(3 * k)) * CH / k
-    img.move(angle, (6, 46.5), (left, up + max(0.0, t - 0.25) ** 2 * 200))
-    draw_drink(img, glaze, 0, style)
+    fall = max(0.0, t - 0.4) / 0.6
+    img.move(-t * 2.2, (CUP_X, CUP_Y), (32 - 26 * min(1.0, t / 0.6), 0), scale=1 - 0.75 * fall)
+    img.fade = 1 - fall
+    draw_cup(img, glaze, "empty", 0)
     return img
 
 
-def draw_drink(img, glaze, fill, style):
-    drink, art = style
-    if drink == "latte":
-        draw_latte(img, glaze, fill)
-    else:
-        draw_espresso(img, glaze, fill)
-    if fill == 2:
-        rim = DRINK_RIMS[drink]
-        foam = (250, 230, 198)
-        if art == 0:
-            img.fill(ellipse(19.5, rim + 0.2, 4.2, 1.1), foam)
-        elif art == 1:
-            for x in (17, 21, 25):
-                img.fill(ellipse(x, rim + 0.2, 1.4, 0.8), foam)
-        else:
-            img.fill(path(((16, rim), (21, rim + 1), (26, rim)), 0.6), foam)
-
-
-def draw_espresso(img, glaze, fill):
-    shade, light = mix(glaze, INK, 0.35), mix(glaze, WHITE, 0.4)
-
-    def glazed(x, _y):
-        t = (x - 6) / 30
-        return mix(light, glaze, t * 4) if t < 0.25 else mix(glaze, shade, (t - 0.45) * 2)
-
-    handle = (
-        (lambda x, y: max(abs(math.hypot(x - 32, y - 33) - 5) - 1.8, 32 - x)),
-        (32, 26, 39, 40),
-    )
-    img.fill(ellipse(21, 45, 18, 2.2), shade)
-    img.fill(ellipse(21, 44, 17, 1.8), light)
-    img.fill(handle, shade)
-    img.fill(union(rbox(9, 24, 33, 43, 5), rbox(9, 24, 33, 32, 0)), glazed)
-    img.fill(ellipse(21, 24, 12, 3.1), light)
-    inside = ellipse(21, 24.3, 10, 2.2)
-    if fill == 0:
-        img.fill(inside, mix(glaze, INK, 0.7))
-    else:
-        img.fill(inside, (88, 54, 34))
-    if fill == 2:
-        img.fill(ellipse(21, 24.5, 8.8, 1.7), (196, 148, 100))
-
-
-def draw_latte(img, glaze, fill):
-    """A tall, tinted glass with visible coffee, milk and foam layers."""
-    glass = poly((8, 7), (34, 7), (31, 45), (11, 45))
-    img.fill(glass, mix(glaze, WHITE, 0.65), 0.85)
-    inside = poly((10, 9), (32, 9), (29.5, 42), (12.5, 42))
-    img.fill(inside, mix(glaze, INK, 0.65))
-    if fill:
-        top = 10 if fill == 2 else 27
-        img.fill(clip(inside, rbox(0, top, 48, 43, 0)), (218, 181, 137))
-        img.fill(clip(inside, rbox(0, max(top, 29), 48, 43, 0)), (244, 222, 188))
-        img.fill(clip(inside, rbox(0, top, 48, top + 5, 0)), (116, 73, 47))
-    img.fill(ellipse(21, 7, 13, 3), mix(glaze, WHITE, 0.8))
-    img.fill(ellipse(21, 7.2, 10.5, 2), (236, 209, 170) if fill == 2 else mix(glaze, INK, 0.5))
-    # A broad coloured sleeve keeps the agent recognisable at terminal size.
-    sleeve = clip(glass, rbox(0, 28, 48, 39, 0))
-    img.fill(sleeve, glaze)
-    img.fill(clip(sleeve, rbox(0, 28, 14, 39, 0)), mix(glaze, WHITE, 0.3))
-    img.fill(ellipse(21, 33.5, 2, 2), WHITE, 0.85)
-    img.fill(capsule(12, 13, 14, 37, 0.7), WHITE, 0.5)
-    img.fill(capsule(31, 13, 29, 38, 0.5), WHITE, 0.25)
-    img.fill(ellipse(21, 44, 9.5, 1.4), glaze)
-
-
-STEAM_FRAMES = 12
-
-
-def steam_sprite(level, frame, rows, drink="espresso"):
-    """Wisps rising from a cup: one for a calm agent, three for a busy one."""
-    img = Img(6, rows)
-    rim = (rows - 1) * CH + DRINK_RIMS[drink] % CH
-    phase = frame / STEAM_FRAMES * 2 * math.pi
-    length = (rim - 2) * (0.5, 0.8, 1.0)[level]
-    for j, base in enumerate(((21,), (17.5, 24.5), (15, 21, 27))[level]):
-
-        def dist(x, y, base=base, off=j * 2.1):
-            if not rim - length < y < rim - 1:
-                return 9.0
-            h = rim - y
-            centre = base + math.sin(h * 0.16 - phase + off) * (0.6 + h * 0.06)
-            return abs(x - centre) - (1.1 + h * 0.03)
-
-        def alpha(_x, y, off=j * 2.1):
-            h = (rim - y) / length
-            fade = min(1.0, h * 5) * max(0.0, 1 - h) ** 0.8
-            return 0.55 * fade * (0.7 + 0.3 * math.sin((rim - y) * 0.3 - 2 * phase + off))
-
-        img.fill((dist, (base - 9, rim - length - 1, base + 9, rim)), (240, 238, 242), alpha)
-    return img
-
-
-def pour_sprite(frame, rows, drink="espresso"):
-    """Coffee pouring into the mug below."""
-    img = Img(6, rows)
-    rim = (rows - 1) * CH + DRINK_RIMS[drink] % CH
-
-    def stream(width, shift=0.0):
-        def dist(x, y):
-            return abs(x - 21 - shift - 0.5 * math.sin(y * 0.5 + frame * 1.6)) - width
-
-        return clip((dist, (17, 0, 25, rim)), rbox(0, 0, 48, rim, 0))
-
-    img.fill(stream(1.4), (104, 62, 38))
-    img.fill(stream(0.4, -0.5), (170, 116, 76))
-    img.fill(ellipse(21, rim + 0.4, 3.4 + frame % 2, 1.1), (126, 80, 50))
-    return img
-
-
-def counter_sprite(cols):
-    """The wooden bar top."""
-    img = Img(cols, 1)
-
-    def wood(x, y):
-        grain = math.sin(x * 0.11 + 2.5 * math.sin(x * 0.013 + y * 0.35))
-        return mix(
-            mix((164, 110, 66), (108, 68, 40), (y - 3) / 13), (86, 52, 30), 0.1 + 0.1 * grain
-        )
-
-    img.fill(rbox(0, 3, cols * CW, 16, 0), wood)
-    img.fill(rbox(0, 1, cols * CW, 4.5, 1.2), (204, 158, 110))  # the lit top edge
-    return img
-
-
-# ---- The barista cat, drawn from simple shapes. Poses face right (walk, nap)
-# or the viewer (sit, groom, yawn). Each coat: name, fur, markings, light fur,
-# eyes, pattern.
+# ---- The barista cat, drawn from simple shapes and seen from above, like the
+# cups. It sits looking up at you, walks facing right (mirrored to go left),
+# and naps curled up. Each coat: name, fur, markings, light fur, eyes, pattern.
 COATS = [
     ("orange tabby", (238, 148, 66), (196, 104, 42), (252, 228, 194), (132, 190, 72), "tabby"),
     ("tuxedo", (54, 54, 62), (54, 54, 62), (240, 240, 236), (232, 200, 70), None),
@@ -749,102 +695,147 @@ COATS = [
     ("white", (246, 246, 248), (216, 216, 224), (255, 255, 255), (92, 160, 232), None),
 ]
 CAT_NAMES = ["Mocha", "Miso", "Biscotti", "Pixel", "Bean", "Cortado", "Nibs", "Ristretto"]
+CALICO_ORANGE = (232, 140, 60)
 
 
-def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=False):  # noqa: PLR0913
-    cx, sway = 28, (0, 2, -1)[tail]
-    eyes = [(cx - 4.3, 21.2), (cx + 4.3, 21.2)]
+def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=0):  # noqa: PLR0913
+    """Sitting on the table and looking up at you."""
+    cx, hy, sway = 30, 17, (0, 2.5, -2)[tail]
+    eyes = [(cx - 4, hy + 0.5), (cx + 4, hy + 0.5)]
     pose = {
-        "tail": path(((35, 46), (42, 44.5), (45.5, 38.5), (44 + sway, 31 + sway / 2)), 2.6),
-        "body": ellipse(cx, 37, 10.5, 11),
-        "head": ellipse(cx, 21.5, 10, 8.5),
+        "tail": path(
+            ((cx + 8, 42), (cx + 13.5, 39), (cx + 15 + sway, 31), (cx + 13 + sway, 25)), 2.4
+        ),
+        "body": ellipse(cx, 33, 11, 11.5),
+        "head": ellipse(cx, hy, 10, 9.3),
         "ears": [
-            poly((cx - 9.6, 19), (cx - 8, 8.5), (cx - 2.4, 14.6)),
-            poly((cx + 2.4, 14.6), (cx + 8, 8.5), (cx + 9.6, 19)),
+            poly((cx - 9.5, hy - 2), (cx - 8, hy - 12.5), (cx - 2.5, hy - 8.5)),
+            poly((cx + 2.5, hy - 8.5), (cx + 8, hy - 12.5), (cx + 9.5, hy - 2)),
         ],
         "inner": [
-            poly((cx - 8, 16.5), (cx - 7.4, 11.6), (cx - 4.4, 15)),
-            poly((cx + 4.4, 15), (cx + 7.4, 11.6), (cx + 8, 16.5)),
+            poly((cx - 8, hy - 4), (cx - 7.2, hy - 10), (cx - 4, hy - 8)),
+            poly((cx + 4, hy - 8), (cx + 7.2, hy - 10), (cx + 8, hy - 4)),
         ],
-        "light": [
-            ellipse(cx, 38.5, 5.6, 8),
-            ellipse(cx - 2, 26, 2.9, 2.2),
-            ellipse(cx + 2, 26, 2.9, 2.2),
-        ],
-        "paws": [ellipse(cx - 4, 46.2, 3.3, 2), ellipse(cx + 4, 46.2, 3.3, 2)],
-        "nose": poly((cx - 1.4, 24.1), (cx + 1.4, 24.1), (cx, 25.6)),
+        "light": [ellipse(cx, 36.5, 5.5, 5.5), ellipse(cx, hy + 5.2, 3.8, 2.7)],
+        "paws": [ellipse(cx - 4.5, 43.6, 3, 2), ellipse(cx + 4.5, 43.6, 3, 2)],
+        "nose": poly((cx - 1.4, hy + 3.4), (cx + 1.4, hy + 3.4), (cx, hy + 4.8)),
         "eyes": [] if closed or groom or yawn else eyes,
-        "closed": [path(((x - 1.7, y), (x, y + 1), (x + 1.7, y)), 0.6) for x, y in eyes],
+        "eye": 1.25,
+        "closed": [path(((x - 1.9, y), (x, y + 1.1), (x + 1.9, y)), 0.6) for x, y in eyes],
         "stripes": [
-            capsule(cx, 14, cx, 16.8, 0.75),
-            capsule(cx - 2.8, 14.6, cx - 2.2, 17, 0.7),
-            capsule(cx + 2.8, 14.6, cx + 2.2, 17, 0.7),
+            capsule(cx, hy - 9.4, cx, hy - 6.2, 0.75),
+            capsule(cx - 2.8, hy - 8.8, cx - 2.3, hy - 5.9, 0.7),
+            capsule(cx + 2.8, hy - 8.8, cx + 2.3, hy - 5.9, 0.7),
             *(
-                capsule(cx + s * 10.3, y, cx + s * 6.5, y + 1, 0.8)
+                capsule(cx + s * 10.6, y, cx + s * 7, y + 1, 0.8)
                 for s in (-1, 1)
-                for y in (33, 37.5)
+                for y in (29.5, 34)
             ),
         ],
+        "patches": [
+            (ellipse(cx - 6, 30, 6, 5), CALICO_ORANGE),
+            (ellipse(cx + 5, hy - 4, 5, 4), None),
+            (ellipse(cx + 6, 39, 4.5, 4), CALICO_ORANGE),
+        ],
     }
-    if slap:
-        px, py = (cx - 6, 29) if slap == 1 else (cx - 13.5, 37.5)
-        pose["legs"] = [capsule(cx - 6, 36, px, py, 2.4)]
-        pose["paws"] = [ellipse(px, py, 2.8, 2.3), pose["paws"][1]]
+    if slap:  # a paw reaching out to the left, to push a cup off the table
+        px, py = (cx - 10, 27) if slap == 1 else (cx - 17, 35)
+        pose["legs"] = [capsule(cx - 6, 34, px, py, 2.4)]
+        pose["paws"] = [ellipse(px, py, 2.9, 2.4), pose["paws"][1]]
     if slap == 3:
         pose["legs"] = []
-        pose["paws"] = [ellipse(cx - 4, 46.2, 3.3, 2), pose["paws"][1]]
-        pose["eyes"] = [(x - 1, y + 0.5) for x, y in eyes]
+        pose["paws"] = [ellipse(cx - 4.5, 43.6, 3, 2), pose["paws"][1]]
+        pose["eyes"] = [(x - 1, y + 0.5) for x, y in eyes]  # watching it fall
     if groom:
-        pose["paws"] = [pose["paws"][0], ellipse(cx + 2.5, 29.5 - groom, 2.6, 3.2)]
+        pose["paws"] = [pose["paws"][0], ellipse(cx + 3, hy + 6 - groom, 2.8, 3.4)]
     if yawn:
-        pose["mouth"] = ellipse(cx, 28, 2.1, 2.5)
+        pose["mouth"] = ellipse(cx, hy + 6.6, 2.2, 2.6)
+    return pose
+
+
+def cat_hiss():
+    """Ears flat, eyes wide, mouth open."""
+    cx, hy = 30, 17
+    pose = cat_sit()
+    pose["ears"] = [
+        poly((cx - 9.5, hy - 1), (cx - 15, hy - 6), (cx - 5, hy - 7.5)),
+        poly((cx + 5, hy - 7.5), (cx + 15, hy - 6), (cx + 9.5, hy - 1)),
+    ]
+    pose["inner"] = []
+    pose["mouth"] = ellipse(cx, hy + 6.6, 2.2, 2.6)
     return pose
 
 
 def cat_walk(step):
-    swing, tip = (3, 1, -3, -1)[step], (0, 1, 2, 1)[step]
+    """Walking to the right, legs reaching out on both sides of its body."""
+    cx, swing, tip = 25, (3, 1, -3, -1)[step], (0, 1, 2, 1)[step]
     return {
-        "tail": path(((10, 30), (5.5, 24), (5, 16.5), (8 + tip, 11)), 2.4),
-        "far": [capsule(19, 35, 19 - swing, 46.3, 2.2), capsule(34, 35, 34 + swing, 46.3, 2.2)],
+        "tail": path(((cx - 13, 30), (cx - 19, 27), (cx - 21, 21 + tip), (cx - 18.5, 15)), 2.4),
+        "far": [
+            capsule(cx - 7, 27, cx - 7 - swing, 21.5, 2.1),
+            capsule(cx + 8, 27, cx + 8 + swing, 21.5, 2.1),
+        ],
         "legs": [
-            capsule(15.5, 35, 15.5 + swing, 46.3, 2.3),
-            capsule(37.5, 35, 37.5 - swing, 46.3, 2.3),
+            capsule(cx - 8, 35, cx - 8 + swing, 41.5, 2.3),
+            capsule(cx + 8, 35, cx + 8 - swing, 41.5, 2.3),
         ],
-        "body": capsule(15, 31.5, 37, 31.5, 7.5),
-        "head": ellipse(43.5, 23.5, 8, 7),
+        "body": ellipse(cx, 31, 14.5, 8),
+        "head": ellipse(cx + 15.5, 27, 7.6, 7),
         "ears": [
-            poly((37.6, 20), (39, 10.6), (43.2, 16.6)),
-            poly((44, 16.2), (48.4, 10.2), (49.6, 19)),
+            poly((cx + 9.5, 23), (cx + 10.6, 15), (cx + 15, 20.4)),
+            poly((cx + 16.4, 20), (cx + 21.4, 14), (cx + 22.6, 21.5)),
         ],
-        "inner": [poly((45, 16.4), (47.8, 12.6), (48.4, 17.4))],
-        "light": [ellipse(26, 37, 9.5, 2.4), ellipse(48.6, 26.4, 3.4, 2.5)],
+        "inner": [poly((cx + 18, 20), (cx + 21, 16.2), (cx + 21.6, 20.6))],
+        "light": [ellipse(cx, 35, 8, 2.4), ellipse(cx + 20, 29.6, 3.2, 2.4)],
         "paws": [
-            ellipse(16.3 + swing, 46.6, 2.6, 1.4),
-            ellipse(38.3 - swing, 46.6, 2.6, 1.4),
+            ellipse(cx - 8 + swing, 42, 2.6, 1.6),
+            ellipse(cx + 8 - swing, 42, 2.6, 1.6),
         ],
-        "nose": circle(51.4, 24.9, 0.95),
-        "eyes": [(46.3, 22.6)],
+        "nose": circle(cx + 22.8, 28.3, 0.95),
+        "eyes": [(cx + 18.2, 26)],
+        "eye": 1.0,
         "stripes": [
-            *(capsule(x, 24.8, x + 0.5, 28.4, 0.9) for x in (21, 26, 31)),
-            capsule(43.5, 16.6, 43.5, 19, 0.7),
+            *(capsule(x, 23.6, x + 0.5, 28.6, 0.95) for x in (cx - 7, cx - 2, cx + 3)),
+            capsule(cx + 15, 20.6, cx + 15.4, 23.4, 0.7),
         ],
+        "patches": [(ellipse(cx - 6, 29, 6, 5), CALICO_ORANGE), (ellipse(cx + 15, 23, 4, 3), None)],
     }
 
 
 def cat_nap(breath):
+    """Curled up asleep, tail wrapped round, head tucked in."""
+    cx, cy, grow_by = 27, 27, breath * 0.5
+    hx, hy = cx + 8, cy + 2.5
+    tail = [(cx + 14.6 * math.cos(a / 10), cy + 12.4 * math.sin(a / 10)) for a in range(3, 31, 3)]
     return {
-        "tail": path(((12, 38.5), (13.5, 43.1), (25, 43.7), (35, 42.9)), 2.6),
-        "body": ellipse(27, 37 - breath * 0.3, 15.5, 7.6 + breath * 0.6),
-        "head": ellipse(41, 37.1, 7.6, 6.2),
+        "tail": path(tail, 2.5),
+        "body": ellipse(cx, cy, 15.5 + grow_by, 13 + grow_by),
+        "head": ellipse(hx, hy, 7.6, 7),
         "ears": [
-            poly((35.4, 34.1), (36.8, 25.7), (40.8, 31.1)),
-            poly((41.6, 30.7), (46.2, 25.9), (47.2, 33.9)),
+            poly((hx - 6.6, hy - 2.6), (hx - 4.8, hy - 10), (hx - 0.8, hy - 6)),
+            poly((hx + 1.2, hy - 6.4), (hx + 6.2, hy - 9.6), (hx + 7, hy - 2.4)),
         ],
-        "inner": [poly((42.6, 31.1), (45.6, 27.7), (46, 32.3))],
-        "light": [ellipse(45.6, 39.7, 2.8, 2)],
-        "nose": circle(48, 38.5, 0.85),
-        "closed": [path(((40.6, 36.9), (42.2, 37.9), (43.8, 36.9)), 0.6)],
-        "stripes": [capsule(x, 29.7, x + 0.6, 33.1, 0.9) for x in (22, 27.5, 33)],
+        "inner": [poly((hx - 5.2, hy - 3.6), (hx - 4.4, hy - 8), (hx - 2, hy - 5.6))],
+        "light": [ellipse(hx, hy + 4.2, 3.2, 2.1)],
+        "paws": [ellipse(hx - 5.5, hy + 6.5, 2.8, 1.8), ellipse(hx + 5, hy + 6, 2.6, 1.8)],
+        "nose": circle(hx, hy + 2.6, 0.9),
+        "closed": [
+            path(((x - 1.6, hy), (x, hy + 1), (x + 1.6, hy)), 0.55) for x in (hx - 2.8, hx + 2.8)
+        ],
+        "stripes": [
+            capsule(
+                cx + math.cos(a) * 6,
+                cy + math.sin(a) * 5,
+                cx + math.cos(a) * 14.5,
+                cy + math.sin(a) * 12,
+                1,
+            )
+            for a in (3.2, 3.7, 4.2, 4.7, 5.2)
+        ],
+        "patches": [
+            (ellipse(cx - 6, cy - 4, 7, 6), CALICO_ORANGE),
+            (ellipse(hx, hy - 4, 4, 3.5), None),
+        ],
     }
 
 
@@ -853,7 +844,7 @@ CAT_POSES = {
     "groom": lambda paw: cat_sit(groom=paw),
     "slap": lambda stage: cat_sit(slap=stage),
     "yawn": lambda: cat_sit(yawn=True),
-    "hiss": lambda: {**cat_sit(), "mouth": ellipse(28, 28, 2.1, 2.5)},  # a yawn, eyes wide open
+    "hiss": cat_hiss,
     "walk": cat_walk,
     "nap": cat_nap,
 }
@@ -867,6 +858,7 @@ def cat_sprite(coat, pose_key, flip, k):
     edge = (128, 128, 142) if dark_fur else mix(fur, INK, 0.55)
     outer = [p["tail"], p["body"], p["head"], *p["ears"], *p.get("legs", []), *p.get("far", [])]
     silhouette = union(*outer)
+    img.fill(grow(union(p["body"], p["head"]), 3.5), INK, 0.22)  # its shadow on the table
     img.fill(grow(silhouette, 1.1), edge)
     for leg in p.get("far", []):
         img.fill(leg, mix(fur, INK, 0.3))
@@ -884,10 +876,11 @@ def cat_sprite(coat, pose_key, flip, k):
     img.fill(p["nose"], PINK)
     if "mouth" in p:
         img.fill(p["mouth"], (120, 40, 52))
+    size = p.get("eye", 1.0)
     for x, y in p.get("eyes", []):
-        img.fill(ellipse(x, y, 1.9, 2.3), eye)
-        img.fill(ellipse(x + 0.1, y + 0.2, 0.85, 1.9), INK)
-        img.fill(circle(x + 0.6, y - 0.8, 0.55), WHITE)
+        img.fill(ellipse(x, y, 1.9 * size, 2.3 * size), eye)
+        img.fill(ellipse(x + 0.1, y + 0.2, 0.85 * size, 1.9 * size), INK)
+        img.fill(circle(x + 0.6 * size, y - 0.8 * size, 0.55 * size), WHITE)
     if not p.get("eyes"):
         for lid in p.get("closed", []):
             img.fill(lid, (170, 170, 182) if dark_fur else INK)
@@ -899,12 +892,8 @@ def cat_markings(img, p, pattern, dark, silhouette):
         for stripe in p["stripes"]:
             img.fill(clip(stripe, silhouette), dark)
     elif pattern == "calico":
-        for shape, color in (
-            (ellipse(18, 30, 9, 7), (232, 140, 60)),
-            (ellipse(37, 20, 6, 5), dark),
-            (ellipse(40, 41, 6, 5), (232, 140, 60)),
-        ):
-            img.fill(clip(shape, silhouette), color)
+        for shape, color in p["patches"]:
+            img.fill(clip(shape, silhouette), color or dark)
     elif pattern == "points":
         for part in (p["tail"], *p["ears"], *p.get("legs", [])):
             img.fill(part, dark, 0.85)
@@ -933,24 +922,31 @@ def hearts_sprite(frame):
 
 
 def ground_img(cols, k):
-    """A one-row sprite whose shapes stand on the counter at any zoom."""
+    """A one-row sprite whose shapes sit on the bottom row of the cat's strip of table."""
     img = Img(math.ceil(cols * k), 1, k)
     img.move(0, (0, 0), (0, CH / k - CH))
     return img
 
 
 def mouse_sprite(step, flip, k):
-    """A little grey mouse, scurrying right."""
+    """A little grey mouse from above, scurrying right."""
     img, fur = ground_img(3, k), (150, 140, 136)
-    img.fill(path(((5, 12), (2, 10), (1, 13.5)), 0.5), PINK)
-    for x in (8, 15) if step else (10, 13):
-        img.fill(ellipse(x, 14.8, 1.6, 0.9), mix(fur, INK, 0.3))
-    img.fill(ellipse(11.5, 11, 6.5, 4), fur)
-    img.fill(ellipse(18, 11, 3.8, 3), fur)
-    img.fill(circle(16.8, 7.8, 2.1), fur)
-    img.fill(circle(16.8, 7.8, 1.2), PINK)
-    img.fill(circle(21.6, 11.6, 0.8), PINK)
-    img.fill(circle(19.2, 10.2, 0.7), INK)
+    wag = 1.2 if step else -1.2
+    img.fill(path(((7, 9.5), (3.5, 9.5 + wag), (0.8, 9.5 - wag)), 0.5), PINK)
+    for x, y in (
+        ((10, 6.6), (10, 12.4), (16, 6.8), (16, 12.2))
+        if step
+        else ((12, 6.6), (12, 12.4), (14, 6.8), (14, 12.2))
+    ):
+        img.fill(ellipse(x, y, 1.2, 0.8), mix(fur, INK, 0.3))
+    img.fill(ellipse(12, 9.5, 6, 3.6), fur)
+    img.fill(poly((16, 6.8), (22.5, 9.5), (16, 12.2)), fur)
+    for y in (6.6, 12.4):
+        img.fill(circle(16.5, y, 1.9), fur)
+        img.fill(circle(16.5, y, 1.1), PINK)
+    img.fill(circle(22.4, 9.5, 0.75), PINK)
+    for y in (8.4, 10.6):
+        img.fill(circle(19.6, y, 0.55), INK)
     return img.mirror() if flip else img
 
 
@@ -959,6 +955,7 @@ def treat_sprite(bites, k):
     img = ground_img(2, k)
     fish = union(ellipse(9, 12.6, 4.6, 2.4), poly((5, 12.6), (1.5, 10), (1.5, 15.2)))
     eaten = rbox(0, 0, 14.5 - bites * 3.5, 16, 0)
+    img.fill(clip(grow(fish, 0.8), eaten), INK, 0.25)
     img.fill(clip(fish, eaten), (214, 160, 96))
     if bites == 0:
         img.fill(circle(11.8, 12, 0.5), INK)
@@ -966,29 +963,41 @@ def treat_sprite(bites, k):
 
 
 def bun_sprite(kind, bites=0):
-    """Fika: a kanelbulle, or a saffron lussekatt in December, bitten from the
-    right where the cat sits."""
-    img, left = Img(3, 1), rbox(-1, 0, 23 - bites * 5.5, 16, 0)
+    """Fika: a kanelbulle, or a saffron lussekatt in December, on a little plate.
+    The cat sits to its left, so the bites come out of that side."""
+    img = Img(6, 3)
+    cx, cy = CUP_X, CUP_Y
+    img.fill(circle(cx + 1.4, cy + 2, 16), INK, 0.3)
+    img.fill(circle(cx, cy, 15.5), SAUCER)
+    img.fill(ring(cx, cy, 12, 0.7), SAUCER_RING)
+    marks = [circle(cx - 11 + i * 5, cy + (2.5 if i % 2 else -2.5), 5.5) for i in range(bites)]
 
     def fill(shape, *paint):
-        img.fill(clip(shape, left), *paint)
+        if marks:
+            shape = clip(shape, (lambda x, y: max(-m[0](x, y) for m in marks), shape[1]))
+        img.fill(shape, *paint)
 
-    fill(ellipse(12, 15.2, 10, 1), INK, 0.3)
     if kind == "lussekatt":
-        # An S: a strand coiled one way at the left end, and the other way at the right.
-        coil = [(a * 0.6 * math.cos(a), a * 0.45 * math.sin(a)) for a in (i / 3 for i in range(19))]
-        strand = [(7 + x, 11 + y) for x, y in coil] + [(17 - x, 11 - y) for x, y in coil[::-1]]
-        fill(path(strand, 2.6), (196, 128, 36))
-        fill(path(strand, 1.9), (240, 182, 62))
-        for x in (7, 17):
-            fill(circle(x, 11, 1.1), (70, 30, 30))
+        # An S: a strand coiled one way at the top, and the other way at the bottom.
+        coil = [
+            (a * 0.75 * math.cos(a), a * 0.75 * math.sin(a)) for a in (i / 3 for i in range(19))
+        ]
+        strand = [(cx - 4 + x, cy - 4 + y) for x, y in coil] + [
+            (cx + 4 - x, cy + 4 - y) for x, y in coil[::-1]
+        ]
+        fill(path(strand, 2.8), (196, 128, 36))
+        fill(path(strand, 2.1), (240, 182, 62))
+        for x, y in ((cx - 4, cy - 4), (cx + 4, cy + 4)):
+            fill(circle(x, y, 1.3), (70, 30, 30))
         return img
-    fill(ellipse(12, 12, 10, 3.6), (176, 108, 52))
-    fill(ellipse(12, 10.2, 8.5, 4), (210, 140, 70))
-    spiral = [(12 + a * 0.75 * math.cos(a), 10.4 + a * 0.32 * math.sin(a)) for a in range(1, 11)]
-    fill(path(spiral, 0.55), (132, 76, 38))
-    for x, y in ((7, 8.5), (10, 7), (15, 7.5), (17.5, 10), (9.5, 11.5), (14, 12)):
-        fill(circle(x, y, 0.7), WHITE)
+    fill(circle(cx, cy, 10.5), (206, 140, 70))
+    spiral = [
+        (cx + a * 0.95 * math.cos(a), cy + a * 0.95 * math.sin(a))
+        for a in (i / 3 for i in range(3, 31))
+    ]
+    fill(path(spiral, 0.9), (140, 82, 38))
+    for x, y in ((-4, -5), (3, -6), (6, 2), (-2, 6), (-7, 1), (1, 0)):
+        fill(rbox(cx + x - 0.7, cy + y - 0.4, cx + x + 0.7, cy + y + 0.4, 0.3), WHITE)
     return img
 
 
@@ -997,11 +1006,8 @@ SPRITES = {
     "treat": treat_sprite,
     "bun": bun_sprite,
     "hearts": hearts_sprite,
+    "cup": cup_sprite,
     "knock": knock_sprite,
-    "mug": mug_sprite,
-    "steam": steam_sprite,
-    "pour": pour_sprite,
-    "counter": counter_sprite,
     "cat": cat_sprite,
 }
 
@@ -1060,9 +1066,11 @@ class Gallery:
 
 
 class Cat:
-    """The barista cat. It walks along the counter behind the cups, goes over to
-    new and finished cups, grooms, yawns, and naps when the bar is quiet. `x` is
-    the column of its middle."""
+    """The barista cat. It lives on the strip of table below the cards: walks,
+    grooms, yawns, and naps when the bar is quiet. It goes up to the cards to
+    sniff new orders, check on ready ones and knock finished cups off the
+    table. `x` is the column of its middle, `y` how many rows above the strip
+    it is."""
 
     MIN_X = 4  # how close its middle gets to the edges
 
@@ -1071,6 +1079,7 @@ class Cat:
         self.coat = random.randrange(len(COATS))
         self.name = random.choice(CAT_NAMES)
         self.x = self.goal = float(home)
+        self.y = self.goal_y = 0.0
         self.dir, self.last, self.speed = 1, now, 7.0  # cols/s
         self.plan, self.mode, self.until = [], "nap", now + 4
         self.pets, self.petted_at, self.target = 0, 0.0, None
@@ -1080,8 +1089,14 @@ class Cat:
     def title(self):
         return f"{self.name} the {COATS[self.coat][0]} cat"
 
-    def go(self, x):
-        self.goal, self.mode, self.plan, self.chasing = float(x), "walk", [], False
+    def go(self, x, y=0):
+        self.goal, self.goal_y, self.mode, self.plan, self.chasing = (
+            float(x),
+            float(y),
+            "walk",
+            [],
+            False,
+        )
 
     def moving(self):
         return self.mode in ("walk", *BUSY_MODES)
@@ -1095,7 +1110,8 @@ class Cat:
         self.mode, self.until, self.plan = mode, now + dur, list(plan)
 
     def slap(self, now):
-        self.do("slap", now, 1.6, ("sit", 2.5))
+        # Among the cards, it doesn't linger: the others close up the gap.
+        self.do("slap", now, 1.6, ("sit", 0.6 if self.y else 2.5))
 
     def hiss(self, now):
         self.do("hiss", now, 1.5, ("sit", 2))
@@ -1120,10 +1136,17 @@ class Cat:
         """Petted or fed in the last 10 minutes: in a good mood."""
         return bool(self.pets or self.fed) and now - max([self.petted_at, *self.fed]) < 600
 
-    def _arrive(self, now, calm, free_x, home):
+    def _arrive(self, now, calm, free_x, home, *, waiting=False):
         u = random.uniform
+        if self.y and self.target is None:  # nothing to do up among the cards: back down
+            self.go(self.x)
+            return
         if home is not None:
             self.plan = [("nap", u(20, 40)), ("sit", 1.5), ("groom", u(2, 4))]
+        elif self.target is not None:
+            self.plan = [("sit", u(1.5, 2.5))]  # a sniff at the cup
+        elif waiting:  # an order is ready: it sits up and looks at you
+            self.plan = [("sit", u(4, 8)), ("groom", u(1, 2))]
         elif calm and self.x >= free_x and random.random() < (0.8 if self.sleepy else 0.5):
             self.plan = [("nap", u(8, 16)), ("yawn", 1.2)]
         else:
@@ -1140,31 +1163,47 @@ class Cat:
         self.mode, dur = self.plan.pop(0)
         self.until = now + dur
 
-    def step(self, now, lane_w, calm, free_x, home=None):
-        dt = min(0.5, now - self.last)
+    def step(self, now, lane_w, calm, free_x, *, home=None, waiting=False):  # noqa: PLR0913
+        dt = min(0.5, max(0.0, now - self.last))  # the clock may jump, even backwards
         self.last = now
         max_x = float(max(self.MIN_X, lane_w - self.MIN_X))
-        if home is not None and abs(self.goal - home) > 0.5:
+        if home is not None and (abs(self.goal - home) > 0.5 or self.goal_y):
             self.go(home)
         if self.mode == "walk":
-            goal = min(max(self.goal, self.MIN_X), max_x)
-            speed = CHASE_SPEED if self.chasing else self.speed
-            if abs(goal - self.x) <= speed * dt:
-                self.x = goal
-                self._arrive(now, calm, free_x, home)
-            else:
-                self.dir = 1 if goal > self.x else -1
-                self.x += self.dir * speed * dt
+            if self._walk(dt, max_x):
+                self._arrive(now, calm, free_x, home, waiting=waiting)
         elif now >= self.until:
             if self.plan:
                 self._next(now)
-            elif home is not None:
-                self._arrive(now, calm, free_x, home)
+            elif home is not None or (waiting and not self.y):
+                self._arrive(now, calm, free_x, home, waiting=waiting)
             elif free_x <= max_x and random.random() < 0.6:
                 self.go(random.uniform(free_x, max_x))
             else:
                 self.go(random.uniform(self.MIN_X, max_x))
         self.x = min(max(self.x, self.MIN_X), max_x)
+
+    def _walk(self, dt, max_x):
+        """A step towards its goal: along the table, and up or down a row at a
+        time. Returns whether it got there."""
+        goal = min(max(self.goal, self.MIN_X), max_x)
+        speed = CHASE_SPEED if self.chasing else self.speed
+        if self.target is not None:  # off to see to a cup: it trots
+            speed = max(speed, ERRAND_SPEED)
+        climb = speed / 2 * dt  # rows are twice as tall as columns are wide
+        if abs(goal - self.x) <= speed * dt and abs(self.goal_y - self.y) <= climb:
+            self.x, self.y = goal, self.goal_y
+            return True
+        if abs(goal - self.x) > speed * dt:
+            self.dir = 1 if goal > self.x else -1
+            self.x += self.dir * speed * dt
+        else:
+            self.x = goal
+        if abs(self.goal_y - self.y) > climb:
+            self.y += climb if self.goal_y > self.y else -climb
+        else:
+            self.y = self.goal_y
+        return False
 
     def pose(self, now):
         """The sprite pose for this moment, and whether to mirror it."""
@@ -1187,19 +1226,19 @@ class Cat:
         return poses.get(self.mode, (("sit", int(now * 1.5) % 3, now % 5 < 0.25), False))
 
     def place(self, frame, art, top, k, now):
-        """Put the cat's picture in `frame`, and its zZ in the text `art` rows."""
+        """Put the cat's picture in `frame`, and its zZ in the strip's text `art` rows."""
         pose, flip = self.pose(now)
         cols, rows, cat_rows = math.ceil(7 * k), len(art), math.ceil(3 * k)
-        left = round(self.x) - cols // 2
-        frame.pics[self.key] = (("cat", self.coat, pose, flip, k), left, top + rows - cat_rows, 1)
+        left, up = round(self.x) - cols // 2, round(self.y)
+        row = top + rows - cat_rows + up
+        frame.pics[self.key] = (("cat", self.coat, pose, flip, k), left, row, 3)
         if self.mode == "purr":
             beat = int((now - self.petted_at) / 0.1) % HEART_FRAMES
-            row = max(top, top + rows - cat_rows - 2)
-            frame.pics[(self.key, "hearts")] = (("hearts", beat), left + 2, row, 4)
+            frame.pics[(self.key, "hearts")] = (("hearts", beat), left + 2, max(0, row - 2), 4)
         if self.mode == "eat":
             bites = min(3, int((now - self.fed[-1]) / 0.6))
-            frame.pics[(self.key, "treat")] = (("treat", bites, k), left, top + rows - 1, 1)
-        if pose[0] == "nap":
+            frame.pics[(self.key, "treat")] = (("treat", bites, k), left, row + cat_rows - 1, 3)
+        if pose[0] == "nap" and not up:
             for i, ch in enumerate("zZ"):
                 r = rows - cat_rows - (int(now * 1.5) + i) % 2
                 col = left + (cols - 2 if not flip else 1) + i
@@ -1207,20 +1246,24 @@ class Cat:
                     art[r][col] = f"{DIM}{ch}{RESET}"
 
 
-# name, cell width per cup, art rows, mug zoom, steam rows
-LAYOUTS = (("full", 14, 6, 1.0, 4), ("short", 14, 4, 1.0, 2), ("mini", 8, 2, 2 / 3, 0))
-TEXT_LAYOUT = ("text", 14, 0, 1.0, 0)
-CUP_TEXT_ROWS = 5  # the counter, the cup's three lines, and a gap
+# ---- The table. Each session is a card: its cup, and three lines beside it
+# (name and project, status, a note). The cat lives on a strip of table below.
+# card size: (card width, rows per card with the gap below, cup zoom, text lines)
+CARDS = {"full": (31, 4, 1.0, 3), "compact": (23, 3, 2 / 3, 2), "text": (26, 4, None, 3)}
+TOP_ROWS, LANE_ROWS = 3, 3  # the header, news and a gap; the cat's strip of table
+MAX_WIDTH = 2 + 4 * CARDS["full"][0]
 HOME_X = 13
+COLD = c256(67)
 
 
-def pick_layout(count, width, rows, gfx):
-    """The roomiest layout whose counters all fit on screen."""
-    for layout in LAYOUTS if gfx else (TEXT_LAYOUT,):
-        per_row = max(1, (width - 2) // layout[1])
-        if -(-count // per_row) * (layout[2] + CUP_TEXT_ROWS) <= rows:
+def pick_cards(count, width, rows, gfx):
+    """The roomiest card size whose cards all fit on screen, and how many fit per row."""
+    for size in ("full", "compact") if gfx else ("text",):
+        card_w, card_h, *_ = CARDS[size]
+        per_row = max(1, (width - 2) // card_w)
+        if -(-count // per_row) * card_h <= rows:
             break
-    return layout, per_row
+    return size, per_row
 
 
 def trim(text, width):
@@ -1228,97 +1271,92 @@ def trim(text, width):
     return text if len(text) <= width else text[: max(0, width - 1)] + "…"
 
 
-def cup_activity(state, pid, session, now, k):
-    """Steam level (None for a cold cup) and status line for a settled drink."""
-    if is_app(session):
-        return app_steam_level(*session[3:]), f"{DIM}open{RESET}"
-    word, since = session_state(state, pid, now)
-    cpu = session[3]
-    level = {
-        "brewing": 2 if cpu >= BUSY_CPU else 1,
-        "idle": 0,
-        "cold": None,
-    }[word]
-    status = word if k < 1 else f"{word} {fmt_since(now - since)}"
-    return level, (status if word == "brewing" else f"{DIM}{status}{RESET}")
+def card_order(state, now):
+    """Ready orders first, then the others in the order they arrived. Finished
+    cups keep their place until the cat clears them."""
+    started = {p: s[2] for p, s in state["live"].items() if not is_app(s)}
+    started.update(
+        (p, cup[3])
+        for p, cup in state["leaving"].items()
+        if not is_app(cup) and not gone(state, p, now)
+    )
+
+    def key(pid):
+        ready = pid in state["live"] and session_state(state, pid, now)[0] == "ready"
+        return not ready, started[pid]
+
+    return sorted(started, key=key)
 
 
-def cup_label(kind, cell=14):
-    """The agent or app's name, in its colour."""
-    style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
-    name, color, _ = DRINKS[style_kind]
-    if kind == COPILOT_SESSION_KIND:
-        name = "Agent"
-    return f"{color}{trim(name, cell - 1)}{RESET}"
-
-
-def cup_where(state, pid, cup, k, cell=14):
-    """The line under the name: a session's project or title, or an app's CPU and RAM."""
-    kind, source = cup[:2]
-    if kind == COPILOT_SESSION_KIND:
-        where = source
-    elif is_app(cup):
-        if pid in state["leaving"]:
-            return ""
-        cpu, ram_mb = cup[3:]
-        where = f"{cpu:.0f}% · {fmt_mem(ram_mb)}" if k == 1 else f"{cpu:.0f}%"
-    else:
-        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
-    return f"{DIM}{trim(where, cell - 1)}{RESET}"
-
-
-def cup_cell(state, pid, now, layout, spot):
-    """Pictures and three text lines for one cup on the counter at (col, top)."""
-    _, cell, art_h, k, steam_rows = layout
-    col, top = spot
-    mug_row = top + art_h - math.ceil(3 * k)
-    pics = {}
-    leaving = pid in state["leaving"]
-    session = state["leaving"][pid] if leaving else state["live"][pid]
-    kind, tty_name = session[:2]
-    drink = "latte" if kind != COPILOT_SESSION_KIND and tty_name.startswith("app:") else "espresso"
-    over = mug_row + DRINK_RIMS[drink] // CH + 1 - steam_rows
-    if isinstance(pid, str):
-        seed = zlib.crc32(pid.encode())
-    else:
-        seed = pid if isinstance(pid, int) else pid[0] + sum(map(ord, pid[1]))
-    style = drink, seed % 3
-    if leaving:
-        ended = session[2]
-        fill = 2 - min(2, int((now - ended) / DRAIN_S * 3))
-        pics[("mug", pid)] = (("mug", SERVED_GLAZE, fill, k, style, 4), col, mug_row, 2)
+def cup_look(state, pid, now, k):
+    """The sprite key for a card's cup at this moment."""
+    if pid in state["leaving"]:
+        kind, _, ended, _ = state["leaving"][pid]
         knocked = state["knocked"].get(pid, now + 1)
         if knocked <= now:
             frame = min(KNOCK_FRAMES - 1, int((now - knocked) / KNOCK_S * KNOCK_FRAMES))
-            up = math.ceil(4 * k) - math.ceil(3 * k)
-            knock = ("knock", SERVED_GLAZE, frame, k, style)
-            pics[("mug", pid)] = (knock, col - round(4 * k), mug_row - up, 2)
-        status = f"{GOLD}✔ served{RESET}" if k == 1 else f"{GOLD}✔{RESET}"
+            return ("knock", SERVED_GLAZE, frame, k)
+        return ("cup", SERVED_GLAZE, "drain", min(2, int((now - ended) / DRAIN_S * 3)), k)
+    kind, _, _, cpu, _ = state["live"][pid]
+    glaze = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][2]
+    seen = state["first_seen"].get(pid, 0)
+    # Sessions already running at startup are served full; new ones pour in.
+    if kind != COPILOT_SESSION_KIND and seen > state["start"] + 1 and now - seen < POUR_S:
+        return ("cup", glaze, "pour", int((now - seen) / POUR_S * POUR_FRAMES), k)
+    word = session_state(state, pid, now)[0]
+    if word == "brewing":  # stirred faster when the agent works harder
+        frame = int(now / (0.075 if cpu >= BUSY_CPU else 0.15)) % STIR_FRAMES
+        return ("cup", glaze, "brewing", frame, k)
+    return ("cup", glaze, word, 0, k)
+
+
+def card_lines(state, pid, now, width):
+    """A card's three lines: name and project, status, and a note."""
+    leaving = pid in state["leaving"]
+    cup = state["leaving"][pid] if leaving else state["live"][pid]
+    kind, source = cup[:2]
+    style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
+    name, color, _ = DRINKS[style_kind]
+    if kind == COPILOT_SESSION_KIND:
+        name, where = "Agent", source
     else:
-        style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
-        glaze = DRINKS[style_kind][2]
-        seen = state["first_seen"].get(pid, 0)
-        # Sessions already running at startup are served full; new ones pour in.
-        poured = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
-        if kind == COPILOT_SESSION_KIND:
-            poured = 1.0
-        level, status = cup_activity(state, pid, session, now, k)
-        if poured < 1:
-            pics[("mug", pid)] = (("mug", glaze, int(poured * 2), k, style, 4), col, mug_row, 2)
-            if steam_rows:
-                pics[("pour", pid)] = (("pour", int(now * 10) % 4, steam_rows, drink), col, over, 3)
-            if drink != "latte":
-                status = f"{GOLD}pouring…{RESET}"
-        else:
-            settled = now - seen - POUR_S
-            wobble = min(4, max(0, int(settled / 0.12))) if seen > state["start"] + 1 else 4
-            # A cup left alone too long goes cold: no crema, no steam.
-            fill = 1 if level is None else 2
-            pics[("mug", pid)] = (("mug", glaze, fill, k, style, wobble), col, mug_row, 2)
-            if steam_rows and level is not None:
-                frame = (int(now / 0.12) + seed) % STEAM_FRAMES
-                pics[("steam", pid)] = (("steam", level, frame, steam_rows, drink), col, over, 3)
-    return pics, (cup_label(kind, cell), cup_where(state, pid, session, k, cell), status)
+        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+    name = trim(name, width)
+    title = f"{color}{BOLD}{name}{RESET}"
+    if width - len(name) > 2:
+        title += f" {DIM}{trim(where, width - len(name) - 1)}{RESET}"
+    if leaving:
+        ended, started = cup[2], cup[3]
+        return [title, f"{GOLD}✔ served{RESET} {DIM}{fmt_since(ended - started)}{RESET}", ""]
+    seen = state["first_seen"].get(pid, 0)
+    if kind != COPILOT_SESSION_KIND and seen > state["start"] + 1 and now - seen < POUR_S:
+        return [title, f"{GOLD}pouring…{RESET}", f"{DIM}new order{RESET}"]
+    word, since = session_state(state, pid, now)
+    took = fmt_since(now - since)
+    status = {
+        "brewing": f"brewing {DIM}{took}{RESET}",
+        "ready": f"{GOLD}{BOLD}ready{RESET} {DIM}{took}{RESET}",
+        "idle": f"{DIM}idle {took}{RESET}",
+        "cold": f"{COLD}cold{RESET} {DIM}{took}{RESET}",
+    }[word]
+    if kind == COPILOT_SESSION_KIND:
+        note = f"{DIM}Copilot app{RESET}"
+    elif word == "ready":
+        note = f"{GOLD}waiting for you{RESET}"
+    elif word == "brewing":
+        note = f"{DIM}{cup[3]:.0f}% cpu{RESET}"
+    else:
+        note = f"{DIM}quiet since {time.strftime('%H:%M', time.localtime(since))}{RESET}"
+    return [title, status, note]
+
+
+def runs(cells):
+    """One line from (column, text) pieces."""
+    out, at = "", 0
+    for col, text in sorted(cells, key=lambda cell: cell[0]):
+        out += " " * max(0, col - at) + text
+        at = max(at, col) + visible_len(text)
+    return out
 
 
 class Frame:
@@ -1333,31 +1371,10 @@ class Frame:
     def add(self, art):
         self.out += ["".join(row).rstrip() for row in art]
 
-    def counter(self):
-        if self.gfx:
-            self.pics[("counter", len(self.out))] = (("counter", self.width), 0, len(self.out), 0)
-            self.out.append("")
-        else:
-            self.out.append(f"{WOOD}{'▀' * self.width}{RESET}")
-
-
-def render_idle(state, now, frame):
-    """An empty bar: a clean cup and a napping cat."""
-    if frame.gfx:
-        top, art = len(frame.out), frame.art(6)
-        frame.pics["idle"] = (("mug", SERVED_GLAZE, 0, 1.0), 2, top + 3, 2)
-        state["cat"].target = None  # its last cup is gone
-        bar_life(state, now, frame, art, top=top, k=1.0, free_x=HOME_X, home=HOME_X)
-        state["cat"].step(now, frame.width, calm=True, free_x=HOME_X, home=HOME_X)
-        state["cat"].place(frame, art, top, 1.0, now)
-        frame.add(art)
-    frame.counter()
-    quip = random.Random(int(now // 10)).choice(IDLE_QUIPS)
-    frame.out += [f"  {DIM}{quip}{RESET}", ""]
-
 
 def cat_visit(state, now):
-    """When the cat reaches a finished cup, it swats it off the bar."""
+    """When the cat reaches a finished cup, it swats it off the table. At a
+    ready order that went cold, it helps itself to the biscuit."""
     cat = state["cat"]
     if cat.target is None or cat.mode == "walk":
         return
@@ -1367,9 +1384,17 @@ def cat_visit(state, now):
         state["knocked"][pid] = now + 0.3  # the paw lands a moment after the swing starts
         state["broken"] += 1
         who = DRINKS[state["leaving"][pid][0]][0]
-        state["toast"] = (f"{cat.name} knocked {who}'s cup off the bar.", now + 4)
+        state["toast"] = (f"{cat.name} knocked {who}'s cup off the table.", now + 4)
     elif pid not in state["knocked"]:
         cat.target = None
+        if pid in state.get("biscuits", ()):
+            state["biscuits"].discard(pid)
+            cat.do("nibble", now, 1.6, ("sit", 0.8))
+            who = DRINKS[state["live"][pid][0]][0] if pid in state["live"] else "a"
+            state["toast"] = (
+                f"{cat.name} ate the biscuit off {who}'s saucer. It went cold.",
+                now + 4,
+            )
 
 
 def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR0913
@@ -1378,7 +1403,8 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
     cat, lane = state["cat"], frame.width
     lane_ends = Cat.MIN_X, max(Cat.MIN_X, lane - Cat.MIN_X)
     due = state.setdefault("due", set())
-    if "mouse" in due and "guest" not in state and cat.free():
+    on_table = cat.free() and not cat.y  # not off checking on a card
+    if "mouse" in due and "guest" not in state and on_table:
         due.discard("mouse")
         side = 1 if cat.x < lane / 2 else -1
         x, speed = cat.x + side * random.uniform(6, 10), random.uniform(10, 20)
@@ -1389,7 +1415,7 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
         state["toast"] = (f"A mouse! {cat.name} {quip}.", now + 3)
     if "mouse" in state:
         run_mouse(state, now, frame, (top + len(art) - 1, k), lane_ends)
-    if "guest" in due and "mouse" not in state and cat.free() and lane >= 40:
+    if "guest" in due and "mouse" not in state and on_table and lane >= 40:
         due.discard("guest")
         guest = Cat(now, lane_ends[0] if cat.x > lane / 2 else lane_ends[1], key="guest")
         guest.coat = random.choice([c for c in range(len(COATS)) if c != cat.coat])
@@ -1405,13 +1431,13 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
     if daypart(now) == "fika" and free_x <= lane - 8 and bites < BUN_BITES:
         bun = fika_bun(now)
         if home is None:
-            nibble(state, now, bun, lane_ends[1])
-        frame.pics["bun"] = (("bun", bun, bites), lane - 8, top + len(art) - 1, 2)
+            nibble(state, now, bun, lane - 12)  # just left of the plate
+        frame.pics["bun"] = (("bun", bun, bites), lane - 8, top, 2)
 
 
 def nibble(state, now, bun, spot):
     """Now and then at fika, the cat walks over to the bun at the end of the
-    counter and takes a bite."""
+    table and takes a bite."""
     cat, due = state["cat"], state["due"]
     if "nibble" in due and "mouse" not in state and "guest" not in state and cat.free():
         due.discard("nibble")
@@ -1427,7 +1453,7 @@ def nibble(state, now, bun, spot):
 
 
 def run_mouse(state, now, frame, spot, lane_ends):
-    """The mouse dashes for the end of the counter. The cat runs at CHASE_SPEED,
+    """The mouse dashes for the edge of the table. The cat runs at CHASE_SPEED,
     so it catches slower mice; faster ones get away."""
     (row, k), cat, mouse = spot, state["cat"], state["mouse"]
     mouse["x"] += mouse["dir"] * mouse["speed"] * min(0.5, now - mouse["last"])
@@ -1446,13 +1472,13 @@ def run_mouse(state, now, frame, spot, lane_ends):
             state["toast"] = (f"The mouse got away. {cat.name} pretends not to care.", now + 4)
     else:
         if cat.chasing:
-            cat.goal, cat.mode, cat.plan = mouse["x"], "walk", []
+            cat.goal, cat.goal_y, cat.mode, cat.plan = mouse["x"], 0.0, "walk", []
         left = round(mouse["x"]) - math.ceil(3 * k) // 2
         frame.pics["mouse"] = (("mouse", int(now * 10) % 2, mouse["dir"] < 0, k), left, row, 1)
 
 
 def run_guest(state, now, lane_ends):
-    """A stray walks up to the barista. A cat in a good mood shares the counter
+    """A stray walks up to the barista. A cat in a good mood shares the table
     for a while; a grumpy one hisses it out."""
     cat, visit = state["cat"], state["guest"]
     guest = visit["cat"]
@@ -1468,7 +1494,7 @@ def run_guest(state, now, lane_ends):
             guest.do("purr", now, 3)
             if cat.free():
                 cat.do("purr", now, 3, ("sit", 6))  # purring, though not petted
-            state["toast"] = (f"{guest.name} and {cat.name} share the counter. ♥", now + 4)
+            state["toast"] = (f"{guest.name} and {cat.name} share the table. ♥", now + 4)
         else:
             visit["phase"], guest.mode, guest.speed, guest.dir = "leave", "walk", 18.0, -guest.dir
             if cat.free():
@@ -1489,8 +1515,107 @@ def run_guest(state, now, lane_ends):
             del state["guest"]
 
 
+def render_cards(state, now, frame, room_rows):
+    """The grid of cards. Returns where each visible card is, as {pid: (col,
+    row, text col)}."""
+    pids = card_order(state, now)
+    if not pids:
+        render_empty(state, now, frame)
+        state["hidden"] = set()
+        return {}
+    size, per_row = pick_cards(len(pids), frame.width, room_rows, frame.gfx)
+    card_w, card_h, k, n_lines = CARDS[size]
+    room = max(1, room_rows // card_h) * per_row
+    visible = pids[:room]
+    state["hidden"] = set(pids[room:])
+    text_at = 0 if k is None else math.ceil(6 * k) + (2 if k == 1 else 1)
+    top = len(frame.out)
+    rows = [[] for _ in range(-(-len(visible) // per_row) * card_h)]
+    spots = {}
+    for i, pid in enumerate(visible):
+        x, y = 2 + (i % per_row) * card_w, (i // per_row) * card_h
+        spots[pid] = (x, top + y, x + text_at)
+        if frame.gfx:
+            look = cup_look(state, pid, now, k)
+            left = x - round(4 * k) if look[0] == "knock" else x
+            frame.pics[("cup", pid)] = (look, left, top + y, 2)
+        for j, line in enumerate(card_lines(state, pid, now, card_w - text_at - 1)[:n_lines]):
+            rows[y + j].append((x + text_at, line))
+    frame.out += [runs(cells).rstrip() for cells in rows]
+    return spots
+
+
+def render_empty(state, now, frame):
+    """No orders: a clean cup, waiting."""
+    top = len(frame.out)
+    if frame.gfx:
+        frame.pics["idle"] = (("cup", SERVED_GLAZE, "empty", 0, 1.0), 2, top, 2)
+    quip = random.Random(int(now // 10)).choice(IDLE_QUIPS)
+    at = 10 if frame.gfx else 2
+    frame.out += [
+        " " * at + f"{BOLD}No orders yet{RESET}",
+        " " * at + f"{DIM}{quip}{RESET}",
+        "",
+        "",
+    ]
+
+
+def footer(state, width):
+    """Open apps, and how many cards didn't fit."""
+    parts = []
+    if state.get("hidden"):
+        more = len(state["hidden"])
+        parts.append(f"{DIM}+{more} more order{'s' * (more > 1)}{RESET}")
+    apps = [(key, s) for key, s in state["live"].items() if is_app(s)]
+    if apps:
+        listed = "   ".join(
+            f"{DRINKS[s[0]][1]}{DRINKS[s[0]][0]}{RESET} {DIM}{s[3]:.0f}% · {fmt_mem(s[4])}{RESET}"
+            for _, s in sorted(apps, key=lambda app: app[1][2])
+        )
+        parts.append(f"{DIM}apps{RESET}  {listed}")
+    return "  " + "   ".join(parts) if parts else ""
+
+
+def aim_cat(state, now, spots, lane_top):
+    """Send the cat up to a finished cup to knock it off, or to a card it wants
+    to check on."""
+    cat = state["cat"]
+    # When the cards reflow, the strip moves. A cat on it moves along; one up
+    # among the cards stays where it is on screen, though never above them.
+    if cat.y:
+        cat.y -= lane_top - state.get("lane_top", lane_top)
+        cat.y = min(0.0, max(cat.y, float(TOP_ROWS - lane_top)))
+    state["lane_top"] = lane_top
+    visit = state.pop("visit", None)
+    if cat.target not in spots:
+        cat.target = None
+    if cat.mode in BUSY_MODES:
+        return
+    pending = [p for p in spots if p in state["leaving"] and p not in state["knocked"]]
+    target = cat.target if cat.target in pending else next(iter(pending), visit)
+    if target in spots:
+        _, row, text_at = spots[target]
+        goal = (text_at + 3, row - lane_top)  # beside the cup, over the card's words
+        if cat.target != target or (cat.goal, cat.goal_y) != goal:
+            cat.go(*goal)
+        cat.target = target
+
+
+def render_lane(state, now, frame, home=None):
+    """The strip of table below the cards, where the cat lives."""
+    cat = state["cat"]
+    top, art = len(frame.out), frame.art(LANE_ROWS)
+    words = {session_state(state, p, now)[0] for p in brewable(state)}
+    bar_life(state, now, frame, art, top=top, k=1.0, free_x=Cat.MIN_X, home=home)
+    calm, waiting = "brewing" not in words, "ready" in words
+    cat.step(now, frame.width, calm, Cat.MIN_X, home=home, waiting=waiting)
+    cat_visit(state, now)
+    cat.place(frame, art, top, 1.0, now)
+    frame.add(art)
+
+
 def gone(state, pid, now):
-    """Whether a finished cup has left the counter. With graphics, the cat swats
+    """Whether a finished cup has left the table. With graphics, the cat swats
     every cup it can reach; the rest leave on their own."""
     if pid in state["knocked"]:
         return now > state["knocked"][pid] + KNOCK_S
@@ -1498,90 +1623,56 @@ def gone(state, pid, now):
     return not waits_for_cat and now > state["leaving"][pid][2] + SERVED_S
 
 
-def render_cups(state, now, pids, frame, room_rows):
-    """Rows of cups on counters, with the cat behind the last row."""
-    cat = state["cat"]
-    calm = not any(session_state(state, p, now)[0] == "brewing" for p in brewable(state))
-    layout, per_row = pick_layout(len(pids), frame.width, room_rows, frame.gfx)
-    _, cell, art_h, k, _ = layout
-    # Even mini cups can run out of room: show what fits and count the rest.
-    room = max(1, room_rows // (art_h + CUP_TEXT_ROWS)) * per_row
-    hidden = max(0, len(pids) - room)
-    groups = [pids[i : i + per_row] for i in range(0, min(room, len(pids)), per_row)]
-    visible = pids[:room]
-    state["hidden"] = set(pids[room:])
-    visit = state.pop("visit", None)
-    if cat.target not in visible:
-        cat.target = None
-    if frame.gfx and cat.mode not in BUSY_MODES:
-        pending = [p for p in visible if p in state["leaving"] and p not in state["knocked"]]
-        target = cat.target if cat.target in pending else next(iter(pending), visit)
-        if target in visible:
-            index = visible.index(target) % per_row
-            goal = 2 + index * cell + math.ceil(6 * k) + 3
-            if cat.target != target or cat.goal != goal:
-                cat.go(goal)
-            cat.target = target
-    cat_row = next((i for i, group in enumerate(groups) if cat.target in group), len(groups) - 1)
-    for gi, group in enumerate(groups):
-        top, art, cells = len(frame.out), frame.art(art_h), []
-        for ci, pid in enumerate(group):
-            pics, lines = cup_cell(state, pid, now, layout, (2 + ci * cell, top))
-            if frame.gfx:
-                frame.pics.update(pics)
-            cells.append(lines)
-        if frame.gfx and gi == cat_row:
-            free_x = 2 + len(group) * cell + 3
-            bar_life(state, now, frame, art, top=top, k=k, free_x=free_x)
-            cat.step(now, frame.width, calm, free_x=free_x)
-            cat_visit(state, now)
-            cat.place(frame, art, top, k, now)
-        frame.add(art)
-        frame.counter()
-        for line in zip(*cells):
-            frame.out.append("  " + "".join(pad(text, cell) for text in line).rstrip())
-        frame.out.append("")
-    if hidden:
-        frame.out[-1] = f"  {DIM}+{hidden} more cups behind the counter{RESET}"
+def summary(state, now):
+    """The tally in colour, for the header."""
+    words = {
+        "ready": f"{GOLD}{BOLD}{{}} ready{RESET}",
+        "brewing": "{} brewing",
+        "idle": f"{DIM}{{}} idle{RESET}",
+        "served": f"{GOLD}{{}} served{RESET}",
+    }
+    counts = tally_counts(state, now)
+    return f"{DIM} · {RESET}".join(words[w].format(n) for w, n in counts.items() if n)
 
 
 def header(state, now, width):
-    """The title line, with the longest key hint that fits."""
+    """The title line: how long the Mac's been awake on the left, the tally and
+    the longest key hint that fits on the right."""
     awake = (
         f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
     )
     battery = state.get("battery")
     if battery and battery[0] and battery[1] is not None:
         awake += f"{RESET}  {GOLD if state.get('saver') else DIM}battery {battery[1]}%"
-    name = state["cat"].name
-    summary = tally(state, now)
+    awake += RESET
+    name, tally_line = state["cat"].name, summary(state, now)
     hints = (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit")
-    tries = [(summary, f"{DIM}{hint}") for hint in hints] + [(summary,), ()]
-    for extras in tries:
-        line = f"{awake}{RESET}" + "".join(f"   {extra}{RESET}" for extra in extras if extra)
-        if visible_len(line) + 1 <= width:  # +1: the cup emoji takes two cells
-            break
-    return line
+    for extras in [(tally_line, f"{DIM}{hint}{RESET}") for hint in hints] + [(tally_line,), ()]:
+        right = "   ".join(extra for extra in extras if extra)
+        # -2: the cup emoji takes two cells, and the last column stays free
+        gap = width - 2 - visible_len(awake) - visible_len(right)
+        if not right or gap >= 3:
+            return awake + " " * gap + right if right else awake
+    return awake
 
 
-def render(state, now):
-    """The text lines for this moment, and the pictures to show on top of them."""
-    cols, term_rows = shutil.get_terminal_size((80, 24))
-    frame = Frame(min(cols, 96), state["gfx"])
-    frame.out = [header(state, now, frame.width), DIM + "─" * frame.width + RESET]
-    # Cups keep their place on the counter, oldest session first.
-    started = {p: session[2] for p, session in state["live"].items()}
-    started.update((p, c[3]) for p, c in state["leaving"].items() if not gone(state, p, now))
-    pids = sorted(started, key=started.get)
-    if pids:
-        render_cups(state, now, pids, frame, term_rows - 5)
-    else:
-        render_idle(state, now, frame)
+def render(state, now, size=None):
+    """The text lines for this moment, and the pictures to show on top of them.
+    `size` is (columns, rows), by default the terminal's."""
+    cols, term_rows = size or shutil.get_terminal_size((80, 24))
+    frame = Frame(min(cols, MAX_WIDTH), state["gfx"])
     if state["toast"] and now < state["toast"][1]:
-        frame.out.append(f"  {GOLD}{state['toast'][0]}{RESET}")
+        news = f"  {GOLD}{state['toast'][0]}{RESET}"
     else:
         quips = DAY_QUIPS.get(daypart(now), QUIPS)
-        frame.out.append(f"  {DIM}“{quips[int(now // 8) % len(quips)]}”{RESET}")
+        news = f"  {DIM}“{quips[int(now // 8) % len(quips)]}”{RESET}"
+    frame.out = [header(state, now, frame.width), news, ""]
+    room = term_rows - 1 - TOP_ROWS - 1 - (LANE_ROWS if frame.gfx else 0)
+    spots = render_cards(state, now, frame, room)
+    frame.out.append(footer(state, frame.width))
+    if frame.gfx:
+        aim_cat(state, now, spots, len(frame.out))
+        render_lane(state, now, frame, home=None if spots else frame.width - 8)
     return frame.out, frame.pics
 
 
@@ -1589,10 +1680,19 @@ def frame_delay(state):
     """Animate smoothly while something moves; tick slowly while everything naps."""
     if not state["gfx"]:
         return IDLE_FRAME_S
-    busy = state["live"] or state["leaving"] or "mouse" in state or "guest" in state
+    now = time.time()
+    stirring = any(session_state(state, p, now)[0] == "brewing" for p in brewable(state))
+    pouring = any(now - seen < POUR_S + 0.5 for seen in state["first_seen"].values())
+    busy = stirring or pouring or state["leaving"] or "mouse" in state or "guest" in state
     if busy or state["cat"].moving():
         return FRAME_S
     return IDLE_FRAME_S
+
+
+def who(state, pid, kind):
+    """An order's name for the news line, such as "Claude in caffe"."""
+    project = state.get("projects", {}).get(pid)
+    return DRINKS[kind][0] + (f" in {project}" if project else "")
 
 
 def update(state):
@@ -1612,26 +1712,41 @@ def update(state):
             if record[0] == COPILOT_SESSION_KIND
         }
     live.update(sessions)
+    take_orders(state, live, now)
+    state["live"] = live
+    state["initialized"] = True
+    track_activity(state, live, now)
+    notice_turns(state, now)
+    # Rush hour: lots of agents working at once. The cat hurries.
+    working = sum(word == "brewing" for word in state["words"].values())
+    if working >= RUSH_AT and not state["rush"]:
+        state["toast"] = (f"Rush hour! {working} agents brewing at once.", now + 5)
+    state["rush"] = working >= RUSH_AT
+    bar_clock(state, now)
+
+
+def take_orders(state, live, now):
+    """New sessions pour in; finished ones are served. Apps come and go quietly."""
     fresh = live.keys() - state["live"].keys()
     projects = state.setdefault("projects", {})
     terminal = [p for p in fresh if not is_app(live[p]) and live[p][0] != COPILOT_SESSION_KIND]
     projects.update((p, project_name(path)) for p, path in scan_cwds(terminal).items())
     for pid in fresh:
         state["first_seen"][pid] = now
-        if state["initialized"]:
-            state["visit"] = pid
-            kind, source = live[pid][:2]
-            if kind == COPILOT_SESSION_KIND:
-                message = f"New session: {source} ☕"
-            else:
-                where = "" if source.startswith("app:") else f" on {source}"
-                where = f" in {projects[pid]}" if pid in projects else where
-                message = f"New order: {DRINKS[kind][0]}{where} ☕"
-            state["toast"] = (message, now + 4)
+        if not state["initialized"] or is_app(live[pid]):
+            continue
+        state["visit"] = pid
+        kind, source = live[pid][:2]
+        if kind == COPILOT_SESSION_KIND:
+            message = f"New session: {source} ☕"
+        else:
+            where = f" in {projects[pid]}" if pid in projects else f" on {source}"
+            message = f"New order: {DRINKS[kind][0]}{where} ☕"
+        state["toast"] = (message, now + 4)
     for pid in state["live"].keys() - live.keys():
         kind, tty_name, started, _, _ = state["live"][pid]
-        if kind == COPILOT_SESSION_KIND:
-            state["first_seen"].pop(pid, None)
+        state["first_seen"].pop(pid, None)
+        if kind == COPILOT_SESSION_KIND or tty_name.startswith("app:"):
             if state["cat"].target == pid:
                 state["cat"].target = None
             continue
@@ -1639,23 +1754,28 @@ def update(state):
         state["leaving"][pid] = (kind, tty_name, now, started)
         state["visit"] = pid
         name = DRINKS[kind][0]
-        # Only sessions count on the receipt: an open app would always be the longest pour.
-        if not tty_name.startswith("app:"):
-            state["orders"][name] = state["orders"].get(name, 0) + 1
-            state["agent_time"] += now - max(started, state["start"])  # while the bar was open
-            state["longest"] = max(state["longest"], (dur, name))
-        where = f" in {projects[pid]}" if pid in projects else ""
-        state["toast"] = (f"Order up: {name}{where} served after {fmt_dur(dur)} ✔", now + 5)
-        state["first_seen"].pop(pid, None)
-    state["live"] = live
-    state["initialized"] = True
-    track_activity(state, live, now)
-    # Rush hour: lots of agents working at once. The cat hurries.
-    working = sum(session_state(state, p, now)[0] == "brewing" for p in brewable(state))
-    if working >= RUSH_AT and not state["rush"]:
-        state["toast"] = (f"Rush hour! {working} agents brewing at once.", now + 5)
-    state["rush"] = working >= RUSH_AT
-    bar_clock(state, now)
+        state["orders"][name] = state["orders"].get(name, 0) + 1
+        state["agent_time"] += now - max(started, state["start"])  # while the bar was open
+        state["longest"] = max(state["longest"], (dur, name))
+        state["toast"] = (f"Served: {who(state, pid, kind)}, after {fmt_dur(dur)} ✔", now + 5)
+
+
+def notice_turns(state, now):
+    """A session that finished its turn is ready: the cat goes to have a look.
+    Left until it goes cold, the cat helps itself to the biscuit."""
+    before = state.get("words", {})  # each session's state at the last poll
+    biscuits = state.setdefault("biscuits", set())
+    words = {p: session_state(state, p, now)[0] for p in brewable(state)}
+    for pid, word in words.items():
+        was, kind = before.get(pid), state["live"][pid][0]
+        if word == "ready" and was not in (None, "ready"):
+            state["visit"] = pid
+            state["toast"] = (f"Order up! {who(state, pid, kind)} is waiting for you.", now + 6)
+        elif word == "cold" and was == "ready":
+            state["visit"] = pid
+            biscuits.add(pid)
+    biscuits.intersection_update(state["live"])
+    state["words"] = words
 
 
 def bar_clock(state, now):

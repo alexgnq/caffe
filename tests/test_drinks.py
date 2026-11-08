@@ -5,183 +5,138 @@ from unittest.mock import patch
 
 
 caffe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "caffe"))
+DIM, RESET, BOLD = caffe["DIM"], caffe["RESET"], caffe["BOLD"]
 
 
-class DrinkTests(unittest.TestCase):
-    def test_cups_show_their_name_then_project_or_terminal(self):
-        for kind, (name, color, _) in caffe["DRINKS"].items():
-            self.assertEqual(caffe["cup_label"](kind), f"{color}{name}{caffe['RESET']}")
-        self.assertEqual(
-            caffe["cup_label"]("opencode", 8),
-            f"{caffe['DRINKS']['opencode'][1]}OpenCo…{caffe['RESET']}",
-        )
-        state = {
-            "live": {
+def bar(**changes):
+    state = {
+        "start": 0,
+        "live": {},
+        "leaving": {},
+        "knocked": {},
+        "first_seen": {},
+        "initialized": True,
+        "rush": False,
+        "orders": {},
+        "agent_time": 0.0,
+        "longest": (0, ""),
+        "broken": 0,
+        "toast": None,
+        "gfx": True,
+        "cat": caffe["Cat"](0, caffe["HOME_X"]),
+    }
+    state.update(changes)
+    return state
+
+
+def poll(state, now, agents, cwds=None):
+    with (
+        patch.dict(
+            caffe["update"].__globals__,
+            scan_agents=lambda: dict(agents),
+            scan_copilot_sessions=lambda: {},
+            scan_cwds=lambda pids: {p: path for p, path in (cwds or {}).items() if p in pids},
+        ),
+        patch("time.time", return_value=now),
+    ):
+        caffe["update"](state)
+
+
+class CardTests(unittest.TestCase):
+    def test_a_card_names_the_agent_then_its_project_or_terminal(self):
+        state = bar(
+            live={
                 1: ("claude", "ttys001", 0, 0, 0),
                 2: ("codex", "ttys002", 0, 0, 0),
                 3: ("pi", "ttys003", 0, 0, 0),
             },
-            "leaving": {},
-            "projects": {1: "caffe", 3: "a-rather-long-project-name"},
-        }
-        lines = {
-            (pid, cell): caffe["cup_where"](state, pid, state["live"][pid], 1.0, cell)
-            for pid in (1, 2, 3)
-            for cell in (14, 8)
-        }
-        dim, reset = caffe["DIM"], caffe["RESET"]
-        self.assertEqual(lines[1, 14], f"{dim}caffe{reset}")
-        self.assertEqual(lines[2, 14], f"{dim}s002{reset}")  # no project: its terminal
-        self.assertEqual(lines[3, 14], f"{dim}a-rather-lon…{reset}")
-        self.assertEqual(lines[3, 8], f"{dim}a-rath…{reset}")
+            projects={1: "caffe", 3: "a-rather-long-project-name"},
+        )
+        for kind in caffe["AGENTS"]:
+            name, color, _ = caffe["DRINKS"][kind]
+            state["live"][9] = (kind, "ttys009", 0, 0, 0)
+            title = caffe["card_lines"](state, 9, 5, 22)[0]
+            self.assertTrue(title.startswith(f"{color}{BOLD}{name}{RESET}"), kind)
+        titles = {pid: caffe["card_lines"](state, pid, 5, 22)[0] for pid in (1, 2, 3)}
+        self.assertTrue(titles[1].endswith(f" {DIM}caffe{RESET}"))
+        self.assertTrue(titles[2].endswith(f" {DIM}s002{RESET}"))  # no project: its terminal
+        self.assertTrue(titles[3].endswith(f" {DIM}a-rather-long-proj…{RESET}"))
+        for width in (22, 17):  # full and compact cards' room for words
+            for pid in (1, 2, 3):
+                lines = caffe["card_lines"](state, pid, 5, width)
+                self.assertTrue(all(caffe["visible_len"](line) <= width for line in lines))
 
-    def test_latte_steam_and_working_state_follow_cpu_or_memory(self):
-        for cpu, memory, level in ((0, 64, 0), (3, 0, 1), (0, 256, 1), (25, 0, 2), (0, 1024, 2)):
-            with self.subTest(cpu=cpu, memory=memory):
-                session = ("codex", "app:Codex", 0, cpu, memory)
-                state = {"live": {1: session}, "leaving": {}, "first_seen": {}, "start": 0}
-                pics, (_, where, status) = caffe["cup_cell"](
-                    state, 1, 5, caffe["LAYOUTS"][0], (2, 0)
-                )
-                self.assertEqual(pics["steam", 1][0][1], level)
-                self.assertEqual(caffe["is_working"](session), level > 0)
-                self.assertIn(f"{cpu}%", where)
-                self.assertIn(caffe["fmt_mem"](memory), where)
-                self.assertEqual(status, f"{caffe['DIM']}open{caffe['RESET']}")
-        self.assertEqual(caffe["fmt_mem"](1536), "1.5G")
-        self.assertFalse(caffe["is_working"](("codex", "ttys001", 0, 0, 2048)))
+    def test_apps_are_listed_below_the_cards_not_served_as_cups(self):
+        app = (40, "vscode")
+        state = bar(live={app: ("vscode", "app:VS Code", 0, 4, 64), 1: ("codex", "ttys1", 0, 0, 0)})
+        lines, pics = caffe["render"](state, 5, (96, 24))
+        footer = next(line for line in lines if "apps" in line)
+        self.assertIn("VS Code", footer)
+        self.assertIn("4% · 64M", footer)
+        self.assertNotIn(("cup", app), pics)
+        self.assertIn(("cup", 1), pics)
+        self.assertNotIn("app", caffe["tally"](state, 5))
 
-    def test_settled_latte_shows_resources_without_runtime_or_source_label(self):
-        state = {
-            "live": {(40, "vscode"): ("vscode", "app:VS Code", 0, 0, 64)},
-            "leaving": {},
-            "first_seen": {},
-            "start": 0,
-        }
-        for layout in caffe["LAYOUTS"]:
-            with self.subTest(layout=layout[0]):
-                _, lines = caffe["cup_cell"](state, (40, "vscode"), 5, layout, (2, 0))
-                usage = "0% · 64M" if layout[3] == 1 else "0%"  # mini cups are narrow
-                self.assertEqual(lines[1], f"{caffe['DIM']}{usage}{caffe['RESET']}")
-                self.assertTrue(all("app:" not in line for line in lines))
+    def test_opening_and_closing_an_app_is_quiet(self):
+        app = (40, "vscode")
+        state = bar()
+        poll(state, 5, {app: ("vscode", "app:VS Code", 0, 4, 64)})
+        self.assertIsNone(state["toast"])
+        poll(state, 8, {})
+        self.assertNotIn(app, state["leaving"])
+        self.assertEqual(state["orders"], {})
+        self.assertIsNone(state["toast"])
 
-    def test_app_identity_survives_pouring_closing_and_knocking(self):
-        key = (100, "vscode")
-        state = {
-            "live": {key: ("vscode", "app:VS Code", 0, 4, 64)},
-            "leaving": {},
-            "knocked": {},
-            "first_seen": {key: 2},
-            "start": 0,
-            "cat": caffe["Cat"](0, caffe["HOME_X"]),
-            "initialized": True,
-            "orders": {},
-            "agent_time": 0.0,
-            "longest": (0, ""),
-            "rush": False,
-            "gfx": True,
-        }
-        layout = caffe["LAYOUTS"][0]
-        for now in (2.1, 4.1, 5):
-            pics, (label, where, _) = caffe["cup_cell"](state, key, now, layout, (2, 0))
-            self.assertEqual(pics["mug", key][0][4][0], "latte")
-            self.assertIn("VS Code", label)
-            if now == 5:
-                self.assertEqual(where, f"{caffe['DIM']}4% · 64M{caffe['RESET']}")
-            for sprite, *_ in pics.values():
-                caffe["SPRITES"][sprite[0]](*sprite[1:])
-        with (
-            patch.dict(
-                caffe["update"].__globals__,
-                scan_agents=lambda: {},
-                scan_copilot_sessions=lambda: {},
-            ),
-            patch("time.time", return_value=6),
+    def test_new_order_toast_names_the_project_or_terminal(self):
+        for cwds, toast in (
+            ({}, "New order: Codex on ttys001 ☕"),
+            ({1: "/Users/me/code/caffe"}, "New order: Codex in caffe ☕"),
         ):
-            caffe["update"](state)
-        self.assertIn(key, state["leaving"])
-        state["knocked"][key] = 7
-        for layout in caffe["LAYOUTS"]:
-            pics, _ = caffe["cup_cell"](state, key, 7.2, layout, (2, 0))
-            sprite = pics["mug", key][0]
-            self.assertEqual(sprite[0], "knock")
-            self.assertEqual(sprite[4][0], "latte")
-            caffe["SPRITES"][sprite[0]](*sprite[1:])
-
-    def test_new_order_toast_names_the_project_or_terminal_but_not_the_app(self):
-        for source, cwds, toast in (
-            ("ttys001", {}, "New order: Codex on ttys001 ☕"),
-            ("ttys001", {1: "/Users/me/code/caffe"}, "New order: Codex in caffe ☕"),
-            ("app:Codex", {}, "New order: Codex ☕"),
-        ):
-            state = {
-                "live": {},
-                "leaving": {},
-                "knocked": {},
-                "first_seen": {},
-                "initialized": True,
-                "rush": False,
-                "cat": caffe["Cat"](0, caffe["HOME_X"]),
-            }
-            with (
-                patch.dict(
-                    caffe["update"].__globals__,
-                    scan_agents=lambda source=source: {1: ("codex", source, 0, 0, 0)},
-                    scan_copilot_sessions=lambda: {},
-                    scan_cwds=lambda pids, cwds=cwds: {p: cwds[p] for p in pids if p in cwds},
-                ),
-                patch("time.time", return_value=6),
-            ):
-                caffe["update"](state)
+            state = bar()
+            poll(state, 6, {1: ("codex", "ttys001", 0, 0, 0)}, cwds)
             self.assertEqual(state["toast"][0], toast)
+            self.assertEqual(state["visit"], 1)  # the cat goes to have a look
 
-    def test_closing_an_app_is_not_a_served_cup(self):
-        state = {
-            "live": {
-                (40, "vscode"): ("vscode", "app:VS Code", 0, 0, 0),
-                1: ("codex", "ttys001", 5, 0, 0),
-            },
-            "start": 0,
-            "leaving": {},
-            "knocked": {},
-            "first_seen": {},
-            "initialized": True,
-            "rush": False,
-            "orders": {},
-            "agent_time": 0.0,
-            "longest": (0, ""),
-            "cat": caffe["Cat"](0, caffe["HOME_X"]),
-        }
-        with (
-            patch.dict(
-                caffe["update"].__globals__,
-                scan_agents=lambda: {},
-                scan_copilot_sessions=lambda: {},
-            ),
-            patch("time.time", return_value=100),
-        ):
-            caffe["update"](state)
+    def test_a_finished_session_is_served_and_counted(self):
+        state = bar(live={1: ("codex", "ttys001", 5, 0, 0)}, projects={1: "caffe"})
+        poll(state, 100, {})
         self.assertEqual(state["orders"], {"Codex": 1})
         self.assertEqual(state["longest"], (95, "Codex"))
-        self.assertIn((40, "vscode"), state["leaving"])
+        self.assertIn(1, state["leaving"])
+        self.assertEqual(state["toast"][0], "Served: Codex in caffe, after 1m 35s ✔")
+        lines = caffe["card_lines"](state, 1, 101, 22)
+        self.assertIn("✔ served", lines[1])
+        self.assertEqual(caffe["cup_look"](state, 1, 101, 1.0)[2], "drain")
 
-    def test_pour_lands_at_each_drinks_rim(self):
-        for source, drink in (("ttys001", "espresso"), ("app:Codex", "latte")):
-            state = {
-                "live": {1: ("codex", source, 0, 0, 0)},
-                "leaving": {},
-                "first_seen": {1: 2},
-                "start": 0,
-            }
-            for layout in caffe["LAYOUTS"][:2]:
-                pics, _ = caffe["cup_cell"](state, 1, 3, layout, (2, 0))
-                mug, pour = pics["mug", 1], pics["pour", 1]
-                rows = pour[0][2]
-                rim = (rows - 1) * caffe["CH"] + caffe["DRINK_RIMS"][drink] % caffe["CH"]
-                self.assertLess(rim, rows * caffe["CH"])
-                self.assertEqual(
-                    pour[2] * caffe["CH"] + rim, mug[2] * caffe["CH"] + caffe["DRINK_RIMS"][drink]
-                )
+    def test_a_new_session_pours_in(self):
+        state = bar(live={1: ("codex", "ttys001", 0, 0, 0)}, first_seen={1: 10})
+        looks = [caffe["cup_look"](state, 1, now, 1.0) for now in (10.1, 11, 11.9, 12.5)]
+        self.assertEqual([look[2] for look in looks], ["pour", "pour", "pour", "idle"])
+        self.assertLess(looks[0][3], looks[2][3])  # the cup fills up
+        self.assertIn("pouring", caffe["card_lines"](state, 1, 11, 22)[1])
+        # Sessions already running when caffe starts are served full.
+        state["first_seen"][1] = 0.5
+        self.assertEqual(caffe["cup_look"](state, 1, 1, 1.0)[2], "idle")
+
+    def test_cards_shrink_to_fit_and_spill_over_below(self):
+        live = {pid: ("codex", f"ttys{pid:03}", pid, 0, 0) for pid in range(1, 17)}
+        sizes = {}
+        for size in ((96, 40), (96, 24), (60, 14)):
+            state = bar(live=live)
+            lines, pics = caffe["render"](state, 5, size)
+            cup = next(p[0] for key, p in pics.items() if key[0] == "cup")
+            sizes[size] = cup[4], len(state["hidden"])
+            self.assertLessEqual(len(lines), size[1] - 1 + 1)
+        self.assertEqual(sizes[96, 40], (1.0, 0))  # full cards
+        self.assertEqual(sizes[96, 24], (2 / 3, 0))  # compact cards, four to a row
+        self.assertGreater(sizes[60, 14][1], 0)  # and some don't fit at all
+
+    def test_text_only_cards_have_no_pictures_and_no_cat(self):
+        state = bar(live={1: ("claude", "ttys001", 0, 0, 0)}, gfx=False, projects={1: "caffe"})
+        lines, pics = caffe["render"](state, 5, (80, 24))
+        self.assertEqual(pics, {})
+        self.assertTrue(lines[3].startswith(f"  {caffe['DRINKS']['claude'][1]}{BOLD}Claude"))
+        self.assertIn("idle", lines[4])
 
 
 if __name__ == "__main__":

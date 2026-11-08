@@ -1,9 +1,11 @@
 import contextlib
 import io
+import math
 import runpy
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
@@ -21,6 +23,7 @@ def bar(**changes):
     state = {
         "start": 0,
         "live": {1: ("codex", "ttys001", 0, 30, 0)},
+        "activity": {1: (0, math.inf)},  # brewing the whole time
         "leaving": {},
         "knocked": {},
         "first_seen": {},
@@ -33,17 +36,13 @@ def bar(**changes):
     return state
 
 
-def play(state, start, end, pids=(1,)):
-    """Render frames from `start` to `end`; returns the last frame."""
-    now = start
+def play(state, start, end, size=(80, 24)):
+    """Render frames from `start` to `end`; returns the last one's lines and pictures."""
+    now, lines, pics = start, [], {}
     while now < end:
-        frame = caffe["Frame"](80, True)
-        if pids:
-            caffe["render_cups"](state, now, list(pids), frame, 20)
-        else:
-            caffe["render_idle"](state, now, frame)
+        lines, pics = caffe["render"](state, now, size)
         now += 0.12
-    return frame
+    return SimpleNamespace(lines=lines, pics=pics)
 
 
 class BatteryTests(unittest.TestCase):
@@ -132,7 +131,7 @@ class MischiefTests(unittest.TestCase):
     def test_mice_come_out_on_an_empty_bar_after_the_last_cup_is_knocked(self):
         state = bar(due={"mouse"}, live={})
         state["cat"].target = 1  # the cup it swatted, now gone
-        play(state, 1, 1.2, pids=())
+        play(state, 1, 1.2)
         self.assertIn("mouse", state)
 
     def test_treats_are_limited(self):
@@ -204,6 +203,29 @@ class SpriteTests(unittest.TestCase):
         for key in (("mouse", 1, True, 2 / 3), ("treat", 2, 1.0), ("bun", "lussekatt")):
             img = caffe["SPRITES"][key[0]](*key[1:])
             self.assertTrue(any(img.buf[3::4]), key)
+
+    def test_every_cup_look_cat_pose_and_coat_draws(self):
+        glaze = caffe["DRINKS"]["claude"][2]
+        for look in caffe["LOOKS"]:
+            for k in (1.0, 2 / 3):
+                self.assertTrue(any(caffe["cup_sprite"](glaze, look, 3, k).buf[3::4]), look)
+        poses = (("sit", 2, True), ("groom", 1), ("slap", 2), ("yawn",), ("hiss",))
+        for coat in range(len(caffe["COATS"])):
+            for pose in (*poses, ("walk", 3), ("nap", 1)):
+                img = caffe["cat_sprite"](coat, pose, True, 1.0)
+                self.assertTrue(any(img.buf[3::4]), (coat, pose))
+
+    def test_a_knocked_cup_slides_away_and_fades(self):
+        glaze = caffe["SERVED_GLAZE"]
+        first, last = (caffe["knock_sprite"](glaze, f) for f in (0, caffe["KNOCK_FRAMES"] - 1))
+        self.assertGreater(sum(first.buf[3::4]), 4 * sum(last.buf[3::4]))
+
+    def test_a_bitten_bun_shows_more_of_its_plate(self):
+        def brightness(bites):
+            buf = caffe["bun_sprite"]("kanelbulle", bites).buf
+            return sum(buf) - sum(buf[3::4])
+
+        self.assertGreater(brightness(3), brightness(0))
 
 
 if __name__ == "__main__":
