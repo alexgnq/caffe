@@ -141,6 +141,7 @@ class DrinkTests(unittest.TestCase):
                 (40, "vscode"): ("vscode", "app:VS Code", 0, 0, 0),
                 1: ("codex", "ttys001", 5, 0, 0),
             },
+            "start": 0,
             "leaving": {},
             "knocked": {},
             "first_seen": {},

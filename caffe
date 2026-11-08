@@ -1642,7 +1642,7 @@ def update(state):
         # Only sessions count on the receipt: an open app would always be the longest pour.
         if not tty_name.startswith("app:"):
             state["orders"][name] = state["orders"].get(name, 0) + 1
-            state["agent_time"] += dur
+            state["agent_time"] += now - max(started, state["start"])  # while the bar was open
             state["longest"] = max(state["longest"], (dur, name))
         where = f" in {projects[pid]}" if pid in projects else ""
         state["toast"] = (f"Order up: {name}{where} served after {fmt_dur(dur)} ✔", now + 5)
@@ -1689,7 +1689,7 @@ def receipt(state, now):
         for s in state["live"].values()
         if s[0] != COPILOT_SESSION_KIND and not s[1].startswith("app:")
     ]
-    agent_time = state["agent_time"] + sum(now - session[2] for session in brewing)
+    agent_time = state["agent_time"] + sum(now - max(s[2], state["start"]) for s in brewing)
     orders = sorted(state["orders"].items(), key=lambda order: -order[1])
     items = [(f"Espresso · {name}", f"×{n}") for name, n in orders] or [("Cups served", "0")]
     if state["broken"]:
