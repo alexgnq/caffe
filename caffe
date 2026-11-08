@@ -13,7 +13,8 @@ On battery at 20% or less, the display may sleep; agents keep running.
 
 Each open app gets a latte, with its CPU and RAM. Running local Copilot app
 sessions and chats also get cards labelled "Agent"; idle ones are hidden. T3 Code
-sessions get cards that say exactly what they're doing.
+sessions get cards that say exactly what they're doing, and Codex CLI cards
+read Codex's records to know when a turn ends or asks you something.
 
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
 kitty, WezTerm or a recent iTerm2. Other terminals get the cards without pictures.
@@ -25,6 +26,7 @@ and get your receipt.
 
 import base64
 import datetime
+import json
 import math
 import os
 import random
@@ -64,6 +66,14 @@ COPILOT_SESSION_KIND = "copilot-session"
 COPILOT_SESSION_DB = Path.home() / ".copilot" / "data.db"
 T3_SESSION_DB = Path.home() / ".t3" / "userdata" / "statev2.sqlite"
 T3_FORGET_S = 3600.0  # a T3 session this quiet leaves the table
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+CODEX_TAIL = 256 * 1024  # how much of the end of a Codex session's log to read
+CODEX_CALLS = (
+    "function_call",
+    "custom_tool_call",
+    "function_call_output",
+    "custom_tool_call_output",
+)
 SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
 GOLD = c256(220)
@@ -273,6 +283,82 @@ def scan_t3_sessions(now):
         sessions[key] = (t3_agent(str(provider)), name or "T3 Code", when(created), 0.0, 0.0)
         told[key] = (word, since, note)
     return sessions, told
+
+
+CODEX_THREADS = """
+    SELECT rollout_path, cwd, updated_at FROM threads
+    WHERE originator = 'codex-tui' AND archived = 0 AND source NOT LIKE '{%'
+      AND updated_at >= ?
+    ORDER BY updated_at DESC
+"""
+
+
+def scan_codex_turns(clis):
+    """What each Codex CLI session is doing, from Codex's own records:
+    {pid: (state, since, note)}. `clis` is {pid: (working directory, started)}.
+    Each takes the session in its folder most recently active since it
+    started. Read-only; of the session's log, only its events' kinds and times
+    are read, never what they say. Sessions it can't read are left out."""
+    if not clis:
+        return {}
+    try:
+        db = max(CODEX_HOME.glob("state_*.sqlite"), key=lambda f: int(f.stem[6:] or 0))
+        uri = db.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            since = min(started for _, started in clis.values()) - 60
+            threads = connection.execute(CODEX_THREADS, (since,)).fetchall()
+    except (OSError, ValueError, sqlite3.Error):
+        return {}  # its records are optional, and their layout undocumented
+    told, taken = {}, set()
+    for pid in sorted(clis, key=lambda p: -clis[p][1]):  # the newest session first
+        cwd, started = clis[pid]
+        for path, folder, updated in threads:
+            if path not in taken and folder == cwd and updated >= started - 60:
+                taken.add(path)
+                turn = codex_turn(path)
+                if turn:
+                    told[pid] = turn
+                break
+    return told
+
+
+def codex_turn(path):
+    """(state, since, note) from the end of a Codex session's log: brewing
+    through a turn, ready once it's done (with a note if it asked you
+    something), idle after you stop it. None if there's no turn to go on."""
+    try:
+        with open(path, "rb") as log:
+            size = log.seek(0, os.SEEK_END)
+            log.seek(max(0, size - CODEX_TAIL))
+            lines = log.read().split(b"\n")[1 if size > CODEX_TAIL else 0 :]
+    except (OSError, TypeError):
+        return None
+    ended, asked, waiting = None, False, None
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+            item = entry["payload"]
+            kind, when = item["type"], parse_session_timestamp(entry["timestamp"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        question = str(item.get("name")).startswith("request_user_input")
+        asked = asked or (kind == "function_call" and question)
+        if waiting is None and kind in CODEX_CALLS:  # the latest call, and whether it waits on you
+            waiting = (
+                when if kind == "function_call" and question and "async" not in item["name"] else 0
+            )
+        if kind == "task_started":
+            if ended:
+                return "ready", ended, ("has a question for you" if asked else "waiting for you")
+            return (
+                ("ready", waiting, "has a question for you") if waiting else ("brewing", when, "")
+            )
+        if ended is None and kind == "turn_aborted":
+            return "idle", when, "stopped"
+        if ended is None and kind == "task_complete":
+            ended = when
+    return ("ready", ended, "waiting for you") if ended else None
 
 
 def scan_agents():
@@ -1657,7 +1743,7 @@ def card_note(state, pid, cup, word, since):
     told = state.get("told", {}).get(pid)
     if cup[0] == COPILOT_SESSION_KIND:
         return f"{DIM}Copilot app{RESET}"
-    if told:
+    if told and told[2]:
         return f"{GOLD if word == 'ready' else DIM}{told[2]}{RESET}"
     if word == "ready":
         return f"{GOLD}waiting for you{RESET}"
@@ -2056,6 +2142,7 @@ def update(state):
         del state["leaving"][pid]
         state["knocked"].pop(pid, None)
         state.get("projects", {}).pop(pid, None)
+        state.get("cwds", {}).pop(pid, None)
     live = scan_agents()
     if live is None:
         return
@@ -2076,6 +2163,9 @@ def update(state):
         live.update(t3[0])
         told = t3[1]
     take_orders(state, live, now)
+    cwds = state.get("cwds", {})
+    clis = {p: (cwds[p], r[2]) for p, r in live.items() if r[0] == "codex" and p in cwds}
+    told.update(scan_codex_turns(clis))
     state["told"] = told
     state["live"] = live
     state["initialized"] = True
@@ -2095,7 +2185,9 @@ def take_orders(state, live, now):
     fresh = live.keys() - state["live"].keys()
     projects = state.setdefault("projects", {})
     terminal = [p for p in fresh if isinstance(p, int)]  # sessions in a terminal
-    projects.update((p, project_name(path)) for p, path in scan_cwds(terminal).items())
+    cwds = scan_cwds(terminal)
+    state.setdefault("cwds", {}).update(cwds)
+    projects.update((p, project_name(path)) for p, path in cwds.items())
     for pid in sorted(fresh, key=lambda p: not is_app(live[p])):  # an order beats its app
         state["first_seen"][pid] = now
         if not state["initialized"]:
@@ -2133,6 +2225,9 @@ def take_orders(state, live, now):
         state["toast"] = (f"Served: {who(state, pid, kind)}, after {fmt_dur(dur)} ✔", now + 5)
 
 
+ASKS = ("has a question for you", "needs your approval")
+
+
 def notice_turns(state, now):
     """A session that finished its turn is ready: the cat goes and calls out
     for you. Left until it goes cold, the cat helps itself to the biscuit."""
@@ -2143,7 +2238,9 @@ def notice_turns(state, now):
         was, kind = before.get(pid), state["live"][pid][0]
         if word == "ready" and was not in (None, "ready"):
             state["visit"] = pid, "ready"
-            state["toast"] = (f"Order up! {who(state, pid, kind)} is waiting for you.", now + 6)
+            said = state.get("told", {}).get(pid, ("", 0, ""))[2]
+            asks = said if said in ASKS else "is waiting for you"
+            state["toast"] = (f"Order up! {who(state, pid, kind)} {asks}.", now + 6)
         elif word == "cold" and was == "ready":
             state["visit"] = pid, "biscuit"
             biscuits.add(pid)
