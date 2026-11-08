@@ -112,12 +112,17 @@ class CopilotSessionTests(unittest.TestCase):
             self.update(state)
             for layout in (*caffe["LAYOUTS"], caffe["TEXT_LAYOUT"]):
                 with self.subTest(title=title, layout=layout[0]):
-                    pics, label, status = caffe["cup_cell"](state, KEY, 100, layout, (2, 0))
+                    pics, (label, where, status) = caffe["cup_cell"](
+                        state, KEY, 100, layout, (2, 0)
+                    )
                     width = layout[1]
                     self.assertEqual(label, f"{caffe['DRINKS']['copilot'][1]}Agent{caffe['RESET']}")
                     self.assertNotIn(caffe["DIM"], label)
                     self.assertLessEqual(caffe["visible_len"](label), width)
-                    self.assertIn("working", status)
+                    self.assertLess(caffe["visible_len"](where), width)
+                    plain = where.removeprefix(caffe["DIM"]).removesuffix(caffe["RESET"])
+                    self.assertTrue(plain == title or title.startswith(plain.removesuffix("…")))
+                    self.assertIn("brewing", status)
                     self.assertEqual(pics["mug", KEY][0][4][0], "espresso")
                     for sprite, *_ in pics.values():
                         caffe["SPRITES"][sprite[0]](*sprite[1:])

@@ -9,21 +9,31 @@ cup for every AI coding agent you have running.
 - **Battery aware.** Unplugged at 20% or less, the display may sleep while the
   system stays awake, so your agents keep running. Plug in and the display
   stays on again. The header shows the charge while you're on battery.
-- **Espressos for CLI sessions.** Copilot CLI, Codex CLI, Claude Code and Pi
-  sessions running in a terminal get small cups and saucers, each in its own
-  colour. New ones pour in, and finished ones drain and turn grey.
+- **Espressos for CLI sessions.** Copilot CLI, Codex CLI, Claude Code, Pi and
+  OpenCode sessions running in a terminal get small cups and saucers, each in
+  its own colour. New ones pour in, and finished ones drain and turn grey.
+  Under each cup: the project folder the session runs in, and what it's doing,
+  such as `brewing 4m` or `idle 12m`.
 - **Lattes for applications.** Codex, Copilot, Claude and VS Code each get a
-  latte named and coloured for the application. Helpers and agent backends
-  belong to that app's drink. These cups track open applications, rather than
-  individual chats, and stay on the bar while the app is open.
-- **Steam follows the work.** The more CPU an agent uses, the more its cup
-  steams. App lattes show total CPU percentage and resident RAM for the app
-  and its descendants. They steam lightly at 3% CPU or 256 MiB, and heavily
-  at 25% CPU or 1 GiB. Resource totals include terminal agents hosted by VS Code,
-  which also retain their individual espressos.
+  latte named and coloured for the application, with the app's CPU and RAM
+  below it. Helpers and agent backends belong to that app's drink. These cups
+  track open applications, rather than individual chats, and stay on the bar
+  while the app is open.
+- **Steam follows the work.** The more CPU an agent uses, along with the
+  tools, builds and tests it runs, the more its cup steams. A session counts as
+  brewing until it has been quiet for 30 seconds, so a pause to wait on the
+  model isn't idling. After 15 idle minutes its coffee goes cold: no steam and
+  no crema. App lattes count the app and its descendants. They steam lightly
+  at 3% CPU or 256 MiB, and heavily at 25% CPU or 1 GiB. Resource totals include
+  terminal agents hosted by VS Code, which also retain their individual
+  espressos.
 - **Copilot session mugs.** Running local Copilot app sessions and chats get
-  individual espressos labeled `Agent` in the spawning app's color.
-  They steam and show `working`; idle sessions disappear without being served.
+  individual espressos labeled `Agent` in the spawning app's color, with the
+  session's title. They brew while running; idle sessions disappear without
+  being served.
+- **At a glance.** The header and the terminal tab's title count what's brewing,
+  idle and just served, such as `☕ 2 brewing · 1 idle`, so you can keep an eye
+  on your agents from another tab.
 - **A barista cat.** A random name and coat each launch. It walks behind the
   cups, checks on new ones, grooms, yawns and naps when things are quiet. It
   knocks every finished cup off the bar.
@@ -40,7 +50,7 @@ cup for every AI coding agent you have running.
   night shift: it walks slower, naps more and gets its own quips. At 14:30
   there's fika: a kanelbulle on the counter, or a lussekatt in December. While
   agents work, the cat sneaks a bite now and then.
-- **Rush hour.** With four or more agents working at once, the cat hurries.
+- **Rush hour.** With four or more sessions brewing at once, the cat hurries.
 - **Lots of agents?** Cups shrink to fit the screen. Anything that still
   doesn't fit is counted below the counter.
 - **Receipt on quit:** an order number, your espressos per agent, the cups the
@@ -84,9 +94,15 @@ including Copilot session tracking and app resource reporting.
 
 ## How it works
 
-- Every 3 seconds, `ps` is checked for `copilot`, `codex`, `claude` and `pi`
-  processes attached to a terminal, and for the Codex, Copilot, Claude and
-  VS Code apps. An app's helpers and agent backends count towards its latte.
+- Every 3 seconds, `ps` is checked for `copilot`, `codex`, `claude`, `pi` and
+  `opencode` processes attached to a terminal, and for the Codex, Copilot, Claude and
+  VS Code apps. An app's helpers and agent backends count towards its latte. A
+  terminal session's processes count towards its espresso, except another
+  agent session started inside it, which gets its own cup.
+- When a terminal session first appears, `lsof` reads its working directory
+  once, for the project name.
+- OpenCode runs its tools in a shared background server, so an OpenCode cup
+  only steams for the work its terminal does.
 - Copilot's local, running, unarchived project, agent and general-chat sessions
   are read from `~/.copilot/data.db` in read-only mode. Only session metadata
   is read, never conversation history. This optional integration uses an

@@ -103,6 +103,44 @@ class AgentDetectionTests(unittest.TestCase):
         self.assertEqual(set(found), {10, 12})
         self.assertEqual(found[10], ("codex", "ttys001", 940, 5, 0))
 
+    def test_a_sessions_cup_counts_the_tools_it_runs_but_not_nested_sessions(self):
+        found = sessions(
+            [
+                (10, 1, "ttys001", 2, "/bin/claude", "claude"),
+                (11, 10, "ttys001", 1, "/bin/zsh", "zsh -c npm test"),
+                (12, 11, "ttys001", 40, "/bin/node", "node jest"),
+                (13, 11, "ttys001", 5, "/bin/codex", "codex exec"),  # an agent the agent started
+                (14, 13, "ttys001", 7, "/bin/cargo", "cargo build"),
+                (20, 1, "ttys002", 90, "/bin/node", "node server.js"),  # not an agent's
+            ]
+        )
+        self.assertEqual(set(found), {10, 13})
+        self.assertEqual(found[10][3], 43)
+        self.assertEqual(found[13][3], 12)
+
+    def test_opencode_sessions_get_espressos_but_its_service_does_not(self):
+        native = "/opt/homebrew/Cellar/opencode/2.2.6/bin/opencode"
+        npm = "/usr/local/lib/node_modules/opencode-ai"
+        found = sessions(
+            [
+                (10, 1, "ttys004", 3, "opencode", "opencode"),
+                (20, 1, "ttys005", 1, "node", f"node {npm}/bin/opencode"),
+                (
+                    21,
+                    20,
+                    "ttys005",
+                    4,
+                    f"{npm}/node_modules/opencode-darwin-arm64/bin/opencode",
+                    "opencode",
+                ),
+                (30, 1, "??", 6, native, f"{native} serve --service"),
+            ]
+        )
+        self.assertEqual(set(found), {10, 20})
+        self.assertEqual(found[10], ("opencode", "ttys004", 940, 3, 0))
+        self.assertEqual(found[20][0], "opencode")
+        self.assertEqual(found[20][3], 5)
+
     def test_vscode_identity_survives_agent_backend_changes(self):
         editor = [
             (30, 1, "??", 0, "/Applications/Visual Studio Code.app/Contents/MacOS/Code", "Code"),

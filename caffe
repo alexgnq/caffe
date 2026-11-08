@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """caffe: keep the Mac awake, with a coffee bar of your running agent sessions.
 
-Every interactive Copilot CLI / Codex CLI / Claude Code / Pi session gets an
-espresso. Each supported desktop application gets a latte named after the app.
+Every interactive Copilot CLI / Codex CLI / Claude Code / Pi / OpenCode session
+gets an espresso, labelled with its project and whether it's brewing, idle or
+gone cold. Each supported desktop application gets a latte named after the app.
 Busy agents steam harder. When a session ends, its cup drains and
 leaves the counter. A barista cat wanders behind the cups, checks on new and
 finished ones, chases the odd mouse, and naps when the bar is quiet. Stray
@@ -51,6 +52,7 @@ AGENTS = {
     "codex": ("Codex", c256(75), (86, 160, 245)),
     "claude": ("Claude", c256(209), (222, 125, 90)),
     "pi": ("Pi", c256(114), (110, 196, 120)),
+    "opencode": ("OpenCode", c256(211), (232, 112, 160)),
 }
 DRINKS = {**AGENTS, "vscode": ("VS Code", c256(44), (40, 190, 210))}
 COPILOT_SESSION_KIND = "copilot-session"
@@ -62,6 +64,7 @@ POLL_S, FRAME_S, IDLE_FRAME_S, POUR_S = 3.0, 0.12, 0.5, 2.0
 DRAIN_S, SERVED_S = 3.0, 15.0  # finished cups the cat can't reach leave on their own
 BUSY_CPU, WORKING_CPU = 25.0, 3.0
 BUSY_RAM_MB, WORKING_RAM_MB = 1024.0, 256.0
+IDLE_AFTER_S, COLD_S = 30.0, 15 * 60  # a session this quiet is idle; this long, its cup is cold
 RUSH_AT = 4  # agents working at once
 LOW_BATTERY, BATTERY_POLL_S = 20, 30.0  # % at which the display may sleep
 MOUSE_ODDS, GUEST_ODDS = 1 / 100, 1 / 300  # per poll: a mouse every ~5 min, a guest every ~15
@@ -231,6 +234,37 @@ def scan_agents():
     return agent_sessions(out, commands, time.time())
 
 
+def scan_cwds(pids):
+    """The working directory of each process, by PID. Read once per new session."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(
+            ["/usr/sbin/lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(map(str, sorted(pids)))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,  # lsof fails when any of the processes has already gone
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    cwds, pid = {}, None
+    for line in out.splitlines():
+        if line[:1] == "p" and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line[:1] == "n" and pid is not None:
+            cwds[pid] = line[1:]
+    return cwds
+
+
+def project_name(path):
+    """A session's project: the folder it runs in, or ~ for the home folder."""
+    if Path(path) == Path.home():
+        return "~"
+    name = os.path.basename(path.rstrip("/")) or path
+    return re.sub(r"[\x00-\x1f\x7f]", "", name)
+
+
 def agent_sessions(out, commands, now):
     """Classify a process snapshot without counting renderers as agent sessions."""
     names = {
@@ -243,7 +277,7 @@ def agent_sessions(out, commands, now):
         for cols in (line.split(None, 6) for line in out.splitlines())
         if len(cols) == 7
     }
-    found, apps = {}, {}
+    found, apps, usage, children = {}, {}, {}, {}
     # UI cups belong to applications, regardless of their underlying agents.
     for pid, cols in processes.items():
         match = re.search(r"/([^/]+)\.app/Contents/MacOS/[^/]+$", names.get(pid, ""))
@@ -256,6 +290,8 @@ def agent_sessions(out, commands, now):
         except ValueError:
             cpu = 0.0
         ram_mb = int(cols[4]) / 1024
+        usage[pid] = cpu, ram_mb
+        children.setdefault(int(cols[1]), []).append(pid)
         host = ui_host(pid, processes, names)
         if host:
             owner, kind = host
@@ -275,17 +311,24 @@ def agent_sessions(out, commands, now):
             kind = "copilot"
         # CLI sessions in VS Code's terminal still get individual espressos.
         if kind and cols[2] != "??" and (not host or host[1] == "vscode"):
-            found[pid] = [kind, int(cols[1]), cols[2], now - parse_etime(cols[5]), cpu, ram_mb]
-    # Fold helper processes whose parent is itself an agent session into that session.
-    for _kind, ppid, _tty, _started, cpu, ram_mb in list(found.values()):
-        if ppid in found:
-            found[ppid][4] += cpu
-            found[ppid][5] += ram_mb
-    sessions = {
-        pid: (kind, tty_name, started, cpu, ram_mb)
-        for pid, (kind, ppid, tty_name, started, cpu, ram_mb) in found.items()
-        if ppid not in found
-    }
+            found[pid] = (kind, int(cols[1]), cols[2], now - parse_etime(cols[5]))
+    # An agent's helpers belong to its session, rather than getting cups of their own.
+    roots = {pid for pid, (_, ppid, _, _) in found.items() if ppid not in found}
+    sessions = {}
+    for pid in roots:
+        kind, _, tty_name, started = found[pid]
+        # Its cup counts everything it runs, such as tools, builds and tests, but
+        # not another agent session started inside it, which has its own cup.
+        cpu = ram_mb = 0.0
+        stack, seen = [pid], set()
+        while stack:
+            child = stack.pop()
+            if child in seen:
+                continue
+            seen.add(child)
+            cpu, ram_mb = cpu + usage[child][0], ram_mb + usage[child][1]
+            stack += [c for c in children.get(child, ()) if c not in roots]
+        sessions[pid] = (kind, tty_name, started, cpu, ram_mb)
     sessions.update((key, tuple(value)) for key, value in apps.items())
     return sessions
 
@@ -311,11 +354,71 @@ def is_working(session):
     return bool(app_steam_level(cpu, ram_mb)) if source.startswith("app:") else cpu >= WORKING_CPU
 
 
+def is_app(session):
+    """An open application's latte, rather than an agent session's espresso."""
+    return session[0] != COPILOT_SESSION_KIND and session[1].startswith("app:")
+
+
+def track_activity(state, live, now):
+    """Remember when each session started brewing and when it last did any work."""
+    activity = state.setdefault("activity", {})
+    for pid, session in live.items():
+        if is_app(session):
+            continue
+        brew_start, last_active = activity.get(pid, (None, None))
+        if is_working(session):
+            if last_active is None or now - last_active >= IDLE_AFTER_S:
+                brew_start = now
+            activity[pid] = (brew_start, now)
+    for pid in activity.keys() - live.keys():
+        del activity[pid]
+
+
+def session_state(state, pid, now):
+    """("brewing" | "idle" | "cold", since when) for a session. Agents use
+    little CPU while they wait on the model, so a session keeps brewing until
+    it has been quiet for IDLE_AFTER_S."""
+    brew_start, last_active = state.get("activity", {}).get(pid, (None, None))
+    if last_active is not None and now - last_active < IDLE_AFTER_S:
+        return "brewing", brew_start
+    since = last_active or state["first_seen"].get(pid, now)
+    return ("cold" if now - since >= COLD_S else "idle"), since
+
+
+def brewable(state):
+    """The live sessions, which brew or go idle, unlike open apps."""
+    return [pid for pid, session in state["live"].items() if not is_app(session)]
+
+
+def tally(state, now):
+    """What the bar is doing, such as "2 brewing · 1 idle · 1 served"."""
+    counts = dict.fromkeys(("brewing", "idle", "served"), 0)
+    for pid in brewable(state):
+        word = session_state(state, pid, now)[0]
+        counts["idle" if word == "cold" else word] += 1
+    for pid, cup in state["leaving"].items():
+        if not is_app(cup) and not gone(state, pid, now):
+            counts["served"] += 1
+    return " · ".join(f"{n} {word}" for word, n in counts.items() if n)
+
+
 def fmt_dur(sec):
     sec = int(sec)
+    d, rem = divmod(sec, 86400)
+    if d:
+        return f"{d}d {rem // 3600}h"
     h, rem = divmod(sec, 3600)
     m, s = divmod(rem, 60)
     return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
+
+
+def fmt_since(sec):
+    """A duration short enough for a cup's status line: 45s, 12m, 3h or 2d."""
+    sec = max(0, int(sec))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if sec >= size:
+            return f"{sec // size}{unit}"
+    return f"{sec}s"
 
 
 def visible_len(s):
@@ -1107,6 +1210,7 @@ class Cat:
 # name, cell width per cup, art rows, mug zoom, steam rows
 LAYOUTS = (("full", 14, 6, 1.0, 4), ("short", 14, 4, 1.0, 2), ("mini", 8, 2, 2 / 3, 0))
 TEXT_LAYOUT = ("text", 14, 0, 1.0, 0)
+CUP_TEXT_ROWS = 5  # the counter, the cup's three lines, and a gap
 HOME_X = 13
 
 
@@ -1114,36 +1218,58 @@ def pick_layout(count, width, rows, gfx):
     """The roomiest layout whose counters all fit on screen."""
     for layout in LAYOUTS if gfx else (TEXT_LAYOUT,):
         per_row = max(1, (width - 2) // layout[1])
-        if -(-count // per_row) * (layout[2] + 4) <= rows:
+        if -(-count // per_row) * (layout[2] + CUP_TEXT_ROWS) <= rows:
             break
     return layout, per_row
 
 
-def cup_activity(session, now):
-    """Steam level and status for a settled drink."""
-    kind, source, started, cpu, ram_mb = session
-    if kind == COPILOT_SESSION_KIND:
-        return 1, f"{DIM}working{RESET}"
-    if source.startswith("app:"):
-        return app_steam_level(cpu, ram_mb), f"{DIM}{cpu:.0f}% · {fmt_mem(ram_mb)}{RESET}"
-    level = 2 if cpu >= BUSY_CPU else (1 if cpu >= WORKING_CPU else 0)
-    return level, f"{DIM}{fmt_dur(now - started)}{RESET}"
+def trim(text, width):
+    """Plain text cut to fit `width` columns, with an ellipsis if it was cut."""
+    return text if len(text) <= width else text[: max(0, width - 1)] + "…"
 
 
-def cup_label(kind, source, k):
+def cup_activity(state, pid, session, now, k):
+    """Steam level (None for a cold cup) and status line for a settled drink."""
+    if is_app(session):
+        return app_steam_level(*session[3:]), f"{DIM}open{RESET}"
+    word, since = session_state(state, pid, now)
+    cpu = session[3]
+    level = {
+        "brewing": 2 if cpu >= BUSY_CPU else 1,
+        "idle": 0,
+        "cold": None,
+    }[word]
+    status = word if k < 1 else f"{word} {fmt_since(now - since)}"
+    return level, (status if word == "brewing" else f"{DIM}{status}{RESET}")
+
+
+def cup_label(kind, cell=14):
+    """The agent or app's name, in its colour."""
     style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
     name, color, _ = DRINKS[style_kind]
     if kind == COPILOT_SESSION_KIND:
         name = "Agent"
-    label = f"{color}{name}{RESET}"
-    if k == 1 and not source.startswith("app:") and kind != COPILOT_SESSION_KIND:
-        label += f" {DIM}{source.replace('ttys', 's')}{RESET}"
-    return label
+    return f"{color}{trim(name, cell - 1)}{RESET}"
+
+
+def cup_where(state, pid, cup, k, cell=14):
+    """The line under the name: a session's project or title, or an app's CPU and RAM."""
+    kind, source = cup[:2]
+    if kind == COPILOT_SESSION_KIND:
+        where = source
+    elif is_app(cup):
+        if pid in state["leaving"]:
+            return ""
+        cpu, ram_mb = cup[3:]
+        where = f"{cpu:.0f}% · {fmt_mem(ram_mb)}" if k == 1 else f"{cpu:.0f}%"
+    else:
+        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+    return f"{DIM}{trim(where, cell - 1)}{RESET}"
 
 
 def cup_cell(state, pid, now, layout, spot):
-    """Pictures and two label lines for one cup on the counter at (col, top)."""
-    _, _, art_h, k, steam_rows = layout
+    """Pictures and three text lines for one cup on the counter at (col, top)."""
+    _, cell, art_h, k, steam_rows = layout
     col, top = spot
     mug_row = top + art_h - math.ceil(3 * k)
     pics = {}
@@ -1176,7 +1302,7 @@ def cup_cell(state, pid, now, layout, spot):
         poured = min(1.0, (now - seen) / POUR_S) if seen > state["start"] + 1 else 1.0
         if kind == COPILOT_SESSION_KIND:
             poured = 1.0
-        level, status = cup_activity(session, now)
+        level, status = cup_activity(state, pid, session, now, k)
         if poured < 1:
             pics[("mug", pid)] = (("mug", glaze, int(poured * 2), k, style, 4), col, mug_row, 2)
             if steam_rows:
@@ -1186,11 +1312,13 @@ def cup_cell(state, pid, now, layout, spot):
         else:
             settled = now - seen - POUR_S
             wobble = min(4, max(0, int(settled / 0.12))) if seen > state["start"] + 1 else 4
-            pics[("mug", pid)] = (("mug", glaze, 2, k, style, wobble), col, mug_row, 2)
-            if steam_rows:
+            # A cup left alone too long goes cold: no crema, no steam.
+            fill = 1 if level is None else 2
+            pics[("mug", pid)] = (("mug", glaze, fill, k, style, wobble), col, mug_row, 2)
+            if steam_rows and level is not None:
                 frame = (int(now / 0.12) + seed) % STEAM_FRAMES
                 pics[("steam", pid)] = (("steam", level, frame, steam_rows, drink), col, over, 3)
-    return pics, cup_label(kind, tty_name, k), status
+    return pics, (cup_label(kind, cell), cup_where(state, pid, session, k, cell), status)
 
 
 class Frame:
@@ -1373,11 +1501,11 @@ def gone(state, pid, now):
 def render_cups(state, now, pids, frame, room_rows):
     """Rows of cups on counters, with the cat behind the last row."""
     cat = state["cat"]
-    calm = not any(is_working(session) for session in state["live"].values())
+    calm = not any(session_state(state, p, now)[0] == "brewing" for p in brewable(state))
     layout, per_row = pick_layout(len(pids), frame.width, room_rows, frame.gfx)
     _, cell, art_h, k, _ = layout
     # Even mini cups can run out of room: show what fits and count the rest.
-    room = max(1, room_rows // (art_h + 4)) * per_row
+    room = max(1, room_rows // (art_h + CUP_TEXT_ROWS)) * per_row
     hidden = max(0, len(pids) - room)
     groups = [pids[i : i + per_row] for i in range(0, min(room, len(pids)), per_row)]
     visible = pids[:room]
@@ -1398,10 +1526,10 @@ def render_cups(state, now, pids, frame, room_rows):
     for gi, group in enumerate(groups):
         top, art, cells = len(frame.out), frame.art(art_h), []
         for ci, pid in enumerate(group):
-            pics, label, status = cup_cell(state, pid, now, layout, (2 + ci * cell, top))
+            pics, lines = cup_cell(state, pid, now, layout, (2 + ci * cell, top))
             if frame.gfx:
                 frame.pics.update(pics)
-            cells.append((label, status))
+            cells.append(lines)
         if frame.gfx and gi == cat_row:
             free_x = 2 + len(group) * cell + 3
             bar_life(state, now, frame, art, top=top, k=k, free_x=free_x)
@@ -1410,8 +1538,8 @@ def render_cups(state, now, pids, frame, room_rows):
             cat.place(frame, art, top, k, now)
         frame.add(art)
         frame.counter()
-        frame.out.append("  " + "".join(pad(label, cell) for label, _ in cells))
-        frame.out.append("  " + "".join(pad(status, cell) for _, status in cells))
+        for line in zip(*cells):
+            frame.out.append("  " + "".join(pad(text, cell) for text in line).rstrip())
         frame.out.append("")
     if hidden:
         frame.out[-1] = f"  {DIM}+{hidden} more cups behind the counter{RESET}"
@@ -1426,8 +1554,11 @@ def header(state, now, width):
     if battery and battery[0] and battery[1] is not None:
         awake += f"{RESET}  {GOLD if state.get('saver') else DIM}battery {battery[1]}%"
     name = state["cat"].name
-    for hint in (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit", ""):
-        line = f"{awake}{RESET}   {DIM}{hint}{RESET}" if hint else f"{awake}{RESET}"
+    summary = tally(state, now)
+    hints = (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit")
+    tries = [(summary, f"{DIM}{hint}") for hint in hints] + [(summary,), ()]
+    for extras in tries:
+        line = f"{awake}{RESET}" + "".join(f"   {extra}{RESET}" for extra in extras if extra)
         if visible_len(line) + 1 <= width:  # +1: the cup emoji takes two cells
             break
     return line
@@ -1469,6 +1600,7 @@ def update(state):
     for pid in [p for p in state["leaving"] if gone(state, p, now)]:
         del state["leaving"][pid]
         state["knocked"].pop(pid, None)
+        state.get("projects", {}).pop(pid, None)
     live = scan_agents()
     if live is None:
         return
@@ -1480,7 +1612,11 @@ def update(state):
             if record[0] == COPILOT_SESSION_KIND
         }
     live.update(sessions)
-    for pid in live.keys() - state["live"].keys():
+    fresh = live.keys() - state["live"].keys()
+    projects = state.setdefault("projects", {})
+    terminal = [p for p in fresh if not is_app(live[p]) and live[p][0] != COPILOT_SESSION_KIND]
+    projects.update((p, project_name(path)) for p, path in scan_cwds(terminal).items())
+    for pid in fresh:
         state["first_seen"][pid] = now
         if state["initialized"]:
             state["visit"] = pid
@@ -1489,6 +1625,7 @@ def update(state):
                 message = f"New session: {source} ☕"
             else:
                 where = "" if source.startswith("app:") else f" on {source}"
+                where = f" in {projects[pid]}" if pid in projects else where
                 message = f"New order: {DRINKS[kind][0]}{where} ☕"
             state["toast"] = (message, now + 4)
     for pid in state["live"].keys() - live.keys():
@@ -1505,14 +1642,16 @@ def update(state):
         # Only sessions count on the receipt: an open app would always be the longest pour.
         if not tty_name.startswith("app:"):
             state["orders"][name] = state["orders"].get(name, 0) + 1
-            state["agent_time"] += dur
+            state["agent_time"] += now - max(started, state["start"])  # while the bar was open
             state["longest"] = max(state["longest"], (dur, name))
-        state["toast"] = (f"Order up: {name} served after {fmt_dur(dur)} ✔", now + 5)
+        where = f" in {projects[pid]}" if pid in projects else ""
+        state["toast"] = (f"Order up: {name}{where} served after {fmt_dur(dur)} ✔", now + 5)
         state["first_seen"].pop(pid, None)
     state["live"] = live
     state["initialized"] = True
+    track_activity(state, live, now)
     # Rush hour: lots of agents working at once. The cat hurries.
-    working = sum(is_working(session) for session in live.values())
+    working = sum(session_state(state, p, now)[0] == "brewing" for p in brewable(state))
     if working >= RUSH_AT and not state["rush"]:
         state["toast"] = (f"Rush hour! {working} agents brewing at once.", now + 5)
     state["rush"] = working >= RUSH_AT
@@ -1550,7 +1689,7 @@ def receipt(state, now):
         for s in state["live"].values()
         if s[0] != COPILOT_SESSION_KIND and not s[1].startswith("app:")
     ]
-    agent_time = state["agent_time"] + sum(now - session[2] for session in brewing)
+    agent_time = state["agent_time"] + sum(now - max(s[2], state["start"]) for s in brewing)
     orders = sorted(state["orders"].items(), key=lambda order: -order[1])
     items = [(f"Espresso · {name}", f"×{n}") for name, n in orders] or [("Cups served", "0")]
     if state["broken"]:
@@ -1656,6 +1795,11 @@ def draw(state, now, gallery, shown):
     ]
     if len(lines) < len(shown):
         out.append(f"\033[{len(lines) + 1};1H\033[J")
+    # The tab title tells you how the bar is doing while you're in another tab.
+    title = f"☕ {tally(state, now) or 'caffe'}"
+    if title != state.get("title"):
+        state["title"] = title
+        out.append(f"\033]2;{title}\007")
     if state["gfx"]:
         out.append(gallery.sync({o: p for o, p in pics.items() if p[2] < height}))
     if out:
@@ -1743,9 +1887,10 @@ def main():
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     gallery = Gallery()
-    # Alternate screen, no cursor, and no autowrap: a line too long for a narrow
-    # pane is cut off instead of spilling onto the next row.
-    sys.stdout.write("\033[?1049h\033[?25l\033[?7l")
+    # Save the tab title, then switch to the alternate screen with no cursor and no
+    # autowrap: a line too long for a narrow pane is cut off instead of spilling
+    # onto the next row.
+    sys.stdout.write("\033[22;2t\033[?1049h\033[?25l\033[?7l")
     try:
         tty.setcbreak(fd)
         state["gfx"] = kitty_graphics(fd)
@@ -1772,7 +1917,7 @@ def main():
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         if state["gfx"]:
             sys.stdout.write("\033_Ga=d,d=A,q=2\033\\")
-        sys.stdout.write("\033[?7h\033[?25h\033[?1049l")
+        sys.stdout.write("\033[?7h\033[?25h\033[?1049l\033[23;2t")
         sys.stdout.flush()
         caf.terminate()
         receipt(state, time.time())

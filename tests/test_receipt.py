@@ -3,9 +3,11 @@ import io
 import runpy
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 caffe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "caffe"))
+GLOBALS = caffe["update"].__globals__
 
 
 def printed(state, now):
@@ -69,6 +71,26 @@ class ReceiptTests(unittest.TestCase):
         state = bar()
         state["cat"].pets = 1
         self.assertIn("1 pet ♥", printed(state, 60))
+
+    def test_agent_time_only_counts_while_the_bar_was_open(self):
+        # The bar opened at 1000. Both sessions were already running; Codex ends at 1500.
+        claude, codex = ("claude", "ttys007", 0, 0, 0), ("codex", "ttys008", 0, 0, 0)
+        state = bar(start=1000, live={7: claude, 8: codex})
+        state.update(leaving={}, knocked={}, first_seen={}, initialized=True, rush=False)
+        with (
+            patch.dict(
+                GLOBALS,
+                scan_agents=lambda: {7: claude},
+                scan_copilot_sessions=lambda: {},
+                scan_cwds=lambda pids: {},
+            ),
+            patch("time.time", return_value=1500),
+        ):
+            caffe["update"](state)
+        self.assertEqual(state["agent_time"], 500)
+        self.assertEqual(state["longest"], (1500, "Codex"))  # the whole session
+        # 500 s for Codex and 1000 s for Claude, over 1000 s awake.
+        self.assertIn("25m 00s (1.5×)", printed(state, 2000))
 
 
 if __name__ == "__main__":
