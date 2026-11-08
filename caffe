@@ -1217,7 +1217,7 @@ class Cat:
     table. `x` is the column of its middle, `y` how many rows above the strip
     it is."""
 
-    MIN_X = 4  # how close its middle gets to the edges
+    MIN_X = 5  # how close its middle gets to the frame's sides
 
     def __init__(self, now, home, key="cat"):
         self.key = key  # its pictures' names, so a visiting cat can share the bar
@@ -1420,26 +1420,42 @@ class Cat:
 # ---- The table. Each session is a card: its cup, and three lines beside it
 # (name and project, status, a note). The cat lives on a strip of table below.
 # card size: (card width, rows per card with the gap below, cup zoom, text lines)
-CARDS = {"full": (31, 4, 1.0, 3), "compact": (23, 3, 2 / 3, 2), "text": (26, 4, None, 3)}
-TOP_ROWS, LANE_ROWS = 3, 3  # the header, news and a gap; the cat's strip of table
-MAX_WIDTH = 2 + 4 * CARDS["full"][0]
+# card size: (narrowest card, rows per card with the gap below, cup zoom, text lines)
+CARDS = {"full": (30, 4, 1.0, 3), "compact": (22, 3, 2 / 3, 2), "text": (25, 4, None, 3)}
+TOP_ROWS, LANE_ROWS = 3, 3  # the top edge, news and a gap; the cat's strip of table
 HOME_X = 13
-COLD = c256(67)
+COLD, EDGE = c256(67), c256(240)
 
 
 def pick_cards(count, width, rows, gfx):
-    """The roomiest card size whose cards all fit on screen, and how many fit per row."""
+    """The roomiest card size whose cards all fit in `width` columns and `rows`
+    rows, how many go in a row, and how wide each is: as many as fit, spread
+    evenly across the width."""
     for size in ("full", "compact") if gfx else ("text",):
-        card_w, card_h, *_ = CARDS[size]
-        per_row = max(1, (width - 2) // card_w)
+        narrowest, card_h, *_ = CARDS[size]
+        per_row = max(1, width // narrowest)
         if -(-count // per_row) * card_h <= rows:
             break
-    return size, per_row
+    return size, per_row, max(width // per_row, 1)
 
 
 def trim(text, width):
     """Plain text cut to fit `width` columns, with an ellipsis if it was cut."""
     return text if len(text) <= width else text[: max(0, width - 1)] + "…"
+
+
+def fit(line, width):
+    """A coloured line cut to fit `width` columns, keeping its colours."""
+    if visible_len(line) <= width:
+        return line
+    out, seen = "", 0
+    for part in re.split(r"(\033\[[\d;]*m)", line):
+        if part.startswith("\033["):
+            out += part
+            continue
+        kept = part[: max(0, width - 1 - seen)]
+        out, seen = out + kept, seen + len(kept)
+    return out + "…" + RESET
 
 
 def card_order(state, now):
@@ -1718,8 +1734,8 @@ def render_cards(state, now, frame, room_rows):
         render_empty(state, now, frame)
         state["hidden"] = set()
         return {}
-    size, per_row = pick_cards(len(pids), frame.width, room_rows, frame.gfx)
-    card_w, card_h, k, n_lines = CARDS[size]
+    size, per_row, card_w = pick_cards(len(pids), frame.width - 4, room_rows, frame.gfx)
+    _, card_h, k, n_lines = CARDS[size]
     room = max(1, room_rows // card_h) * per_row
     visible = pids[:room]
     state["hidden"] = set(pids[room:])
@@ -1736,7 +1752,7 @@ def render_cards(state, now, frame, room_rows):
             frame.pics[("cup", pid)] = (look, left, top + y, 2)
         lines = card_lines(state, pid, now, card_w - text_at - 1)
         for j, line in enumerate(lines[:n_lines]):
-            rows[y + j].append((x + text_at, line))
+            rows[y + j].append((x + text_at, fit(line, card_w - text_at - 1)))
     frame.out += [runs(cells).rstrip() for cells in rows]
     return spots
 
@@ -1748,18 +1764,20 @@ def render_empty(state, now, frame):
         frame.pics["idle"] = (("cup", SERVED_GLAZE, "empty", 0, 1.0), 2, top, 2)
     quip = random.Random(int(now // 10)).choice(IDLE_QUIPS)
     at = 10 if frame.gfx else 2
+    room = frame.width - at - 2
     frame.out += [
-        " " * at + f"{BOLD}No orders yet{RESET}",
-        " " * at + f"{DIM}{quip}{RESET}",
+        " " * at + fit(f"{BOLD}No orders yet{RESET}", room),
+        " " * at + fit(f"{DIM}{quip}{RESET}", room),
         "",
         "",
     ]
 
 
 def footer(state, frame):
-    """A line below the cards, saying how many didn't fit."""
+    """A line below the cards, if some didn't fit."""
     more = len(state.get("hidden", ()))
-    frame.out.append(f"  {DIM}+{more} more order{'s' * (more > 1)}{RESET}" if more else "")
+    if more:
+        frame.out.append(f"  {DIM}+{more} more order{'s' * (more > 1)}{RESET}")
 
 
 def aim_cat(state, now, spots, lane_top):
@@ -1815,7 +1833,7 @@ def gone(state, pid, now):
 
 
 def summary(state, now):
-    """The tally in colour, for the header."""
+    """The tally in colour, for the frame's top edge."""
     words = {
         "ready": f"{GOLD}{BOLD}{{}} ready{RESET}",
         "brewing": "{} brewing",
@@ -1826,44 +1844,70 @@ def summary(state, now):
     return f"{DIM} · {RESET}".join(words[w].format(n) for w, n in counts.items() if n)
 
 
-def header(state, now, width):
-    """The title line: how long the Mac's been awake on the left, the tally and
-    the longest key hint that fits on the right."""
-    awake = (
-        f"{BOLD}☕ caffe{RESET}  {DIM}Mac awake for{RESET} {BOLD}{fmt_dur(now - state['start'])}"
-    )
+def edge(left, right, width, corners):
+    """A rounded edge of the frame, with words set into it on the left and
+    right. None if they don't fit."""
+    fill = width - 6 - visible_len(left) - (visible_len(right) + 2 if right else 0)
+    fill -= left.count("☕")  # the cup emoji takes two cells
+    if fill < 1:
+        return None
+    line = f"{EDGE}{corners[0]}─{RESET} {left} {EDGE}{'─' * fill}{RESET}"
+    return line + (f" {right} " if right else "") + f"{EDGE}─{corners[1]}{RESET}"
+
+
+def top_edge(state, now, width):
+    """The frame's top edge: caffe, how long the Mac's been awake, and the
+    tally. In a narrow pane, the less important words go first."""
+    title, awake = f"{BOLD}☕ caffe{RESET}", f"{BOLD}{fmt_dur(now - state['start'])}{RESET}"
     battery = state.get("battery")
     if battery and battery[0] and battery[1] is not None:
-        awake += f"{RESET}  {GOLD if state.get('saver') else DIM}battery {battery[1]}%"
-    awake += RESET
-    name, tally_line = state["cat"].name, summary(state, now)
-    hints = (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit")
-    for extras in [(tally_line, f"{DIM}{hint}{RESET}") for hint in hints] + [(tally_line,), ()]:
-        right = "   ".join(extra for extra in extras if extra)
-        # -2: the cup emoji takes two cells, and the last column stays free
-        gap = width - 2 - visible_len(awake) - visible_len(right)
-        if not right or gap >= 3:
-            return awake + " " * gap + right if right else awake
-    return awake
+        awake += f" {GOLD if state.get('saver') else DIM}battery {battery[1]}%{RESET}"
+    tally_line, dash = summary(state, now), f" {EDGE}─{RESET} "
+    lefts = (f"{title}{dash}{DIM}awake{RESET} {awake}", f"{title}{dash}{awake}", title)
+    for left, right in [(left, tally_line) for left in lefts] + [(title, "")]:
+        line = edge(left, right, width, "╭╮")
+        if line:
+            return line
+    return f"{EDGE}╭{'─' * (width - 2)}╮{RESET}"
+
+
+def bottom_edge(state, width):
+    """The frame's bottom edge, with the longest key hint that fits."""
+    name = state["cat"].name
+    for hint in (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit", "q quit"):
+        line = edge(f"{DIM}{hint}{RESET}", "", width, "╰╯")
+        if line:
+            return line
+    return f"{EDGE}╰{'─' * (width - 2)}╯{RESET}"
+
+
+def framed(line, width):
+    """A line inside the frame, between its sides."""
+    body = line[1:] if line[:1] == " " else line  # the first column is the frame's side
+    return f"{EDGE}│{RESET}{body}{' ' * max(0, width - 2 - visible_len(body))}{EDGE}│{RESET}"
 
 
 def render(state, now, size=None):
     """The text lines for this moment, and the pictures to show on top of them.
-    `size` is (columns, rows), by default the terminal's."""
+    `size` is (columns, rows), by default the terminal's. Everything sits in a
+    frame as wide as the pane, and as tall as it needs."""
     cols, term_rows = size or shutil.get_terminal_size((80, 24))
-    frame = Frame(min(cols, MAX_WIDTH), state["gfx"])
+    width = cols - 1  # some terminals don't show the last column
+    frame = Frame(width, state["gfx"])
     if state["toast"] and now < state["toast"][1]:
-        news = f"  {GOLD}{state['toast'][0]}{RESET}"
+        news = f"  {GOLD}{trim(state['toast'][0], width - 4)}{RESET}"
     else:
         quips = DAY_QUIPS.get(daypart(now), QUIPS)
-        news = f"  {DIM}“{quips[int(now // 8) % len(quips)]}”{RESET}"
-    frame.out = [header(state, now, frame.width), news, ""]
-    room = term_rows - 1 - TOP_ROWS - 1 - (LANE_ROWS if frame.gfx else 0)
+        news = f"  {DIM}{trim(f'“{quips[int(now // 8) % len(quips)]}”', width - 4)}{RESET}"
+    frame.out = ["", news, ""]  # the first line becomes the top edge
+    room = term_rows - 1 - TOP_ROWS - 1 - (LANE_ROWS if frame.gfx else 0) - 1
     spots = render_cards(state, now, frame, room)
     footer(state, frame)
     if frame.gfx:
         aim_cat(state, now, spots, len(frame.out))
-        render_lane(state, now, frame, home=None if spots else frame.width - 8)
+        render_lane(state, now, frame, home=None if spots else width - 9)
+    inside = [framed(line, width) for line in frame.out[1:]]
+    frame.out = [top_edge(state, now, width), *inside, bottom_edge(state, width)]
     return frame.out, frame.pics
 
 

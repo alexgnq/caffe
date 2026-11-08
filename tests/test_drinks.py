@@ -1,3 +1,4 @@
+import re
 import runpy
 import unittest
 from pathlib import Path
@@ -157,12 +158,38 @@ class CardTests(unittest.TestCase):
         self.assertEqual(sizes[96, 24], (2 / 3, 0))  # compact cards, four to a row
         self.assertGreater(sizes[60, 14][1], 0)  # and some don't fit at all
 
+    def test_the_frame_fills_any_pane_and_never_spills_over(self):
+        live = {i: ("opencode", f"ttys{i:03}", i, 10 * (i % 3), 0) for i in range(1, 9)}
+        live[40, "codex"] = ("codex", "app:Codex", 0, 3, 1850)
+        projects = dict.fromkeys(range(1, 9), "a-rather-long-project-name")
+        toast = ("Order up! OpenCode in a-rather-long-project-name is waiting for you.", 99)
+        for gfx in (True, False):
+            for cols, rows in ((24, 40), (34, 40), (50, 40), (96, 24), (160, 20), (96, 12)):
+                with self.subTest(gfx=gfx, size=(cols, rows)):
+                    state = bar(live=dict(live), gfx=gfx, projects=projects, toast=toast)
+                    lines, pics = caffe["render"](state, 5, (cols, rows))
+                    widths = {caffe["visible_len"](line) + line.count("☕") for line in lines}
+                    self.assertEqual(widths, {cols - 1})  # the last column stays free
+                    plain = [re.sub(r"\033\[[\d;]*m", "", line) for line in lines]
+                    self.assertEqual((plain[0][0], plain[-1][0]), ("╭", "╰"))
+                    self.assertTrue(all(line[0] == line[-1] == "│" for line in plain[1:-1]))
+                    for (
+                        key,
+                        col,
+                        _,
+                        _,
+                    ) in pics.values():  # nothing but a falling cup crosses the sides
+                        if key[0] != "knock":
+                            self.assertGreaterEqual(col, 1)
+
     def test_text_only_cards_have_no_pictures_and_no_cat(self):
         state = bar(live={1: ("claude", "ttys001", 0, 0, 0)}, gfx=False, projects={1: "caffe"})
         lines, pics = caffe["render"](state, 5, (80, 24))
         self.assertEqual(pics, {})
-        self.assertTrue(lines[3].startswith(f"  {caffe['DRINKS']['claude'][1]}{BOLD}Claude"))
-        self.assertIn("idle", lines[4])
+        plain = [re.sub(r"\033\[[\d;]*m", "", line) for line in lines]
+        self.assertEqual(plain[3].split()[:3], ["│", "Claude", "caffe"])
+        self.assertIn("idle", plain[4])
+        self.assertTrue(plain[0].startswith("╭─ ☕ caffe") and plain[-1].startswith("╰─"))
 
 
 if __name__ == "__main__":

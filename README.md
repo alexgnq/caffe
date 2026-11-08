@@ -9,7 +9,7 @@ after them.
 - **Keeps the Mac awake** until you quit (`caffeinate -dimsu` under the hood).
 - **Battery aware.** Unplugged at 20% or less, the display may sleep while the
   system stays awake, so your agents keep running. Plug in and the display
-  stays on again. The header shows the charge while you're on battery.
+  stays on again. The frame's top edge shows the charge while you're on battery.
 - **A table of orders, seen from above.** Every Copilot CLI, Codex CLI, Claude
   Code, Pi and OpenCode session running in a terminal is a card: a cup on its
   saucer in the agent's colour, the project folder it runs in, what it's doing
@@ -35,7 +35,7 @@ after them.
   colour, with its CPU and RAM, counting everything the app runs. The foam swirls while the app is busy. Opening an app pours its
   latte in; closing it settles its tab, and the cat knocks the empty glass off
   the table. Apps don't count as orders.
-- **At a glance.** The header and the terminal tab's title count what's ready,
+- **At a glance.** The frame's top edge and the terminal tab's title count what's ready,
   brewing, idle and just served, such as `☕ 1 ready · 2 brewing`, so you can
   keep an eye on your agents from another tab.
 - **A barista cat.** A random name and coat each launch. It lives on the strip
@@ -58,8 +58,11 @@ after them.
   there's fika: a kanelbulle on a plate, or a lussekatt in December. While
   agents work, the cat sneaks a bite now and then.
 - **Rush hour.** With four or more sessions brewing at once, the cat hurries.
-- **Lots of agents?** Cards shrink to fit the screen, four to a row. Anything
-  that still doesn't fit is counted below them.
+- **Fits any pane.** Everything sits in a frame as wide as the pane, with the
+  tally in its top edge and the keys in its bottom edge. Cards spread evenly
+  across the width, as many to a row as fit, so a narrow tiled pane stacks them
+  and a wide one lines them up. With lots of agents, cards shrink to fit;
+  anything that still doesn't fit is counted below them.
 - **Receipt on quit:** an order number, your espressos per agent, the cups the
   cat broke, the mice it caught, time awake against total agent time, the
   longest session, visiting cats, and the cat's tip in pets and treats. Open

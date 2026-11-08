@@ -62,7 +62,7 @@ class BatteryTests(unittest.TestCase):
         self.assertEqual(started, [True, False])
         first.terminate.assert_called_once()  # or -dimsu would keep the display on
         self.assertIn("Plugged in", state["toast"][0])
-        self.assertIn("battery 19%", caffe["header"]({**state, "battery": (True, 19)}, 0, 120))
+        self.assertIn("battery 19%", caffe["top_edge"]({**state, "battery": (True, 19)}, 0, 120))
 
 
 class TimeOfDayTests(unittest.TestCase):

@@ -145,14 +145,19 @@ class CupStatusTests(unittest.TestCase):
             (40, "codex"): ("codex", "app:Codex", 0, 0, 2048),
         }
         poll(state, 100, agents)
-        header = caffe["header"](state, 100, 120)
-        self.assertIn("2 brewing", header)
-        self.assertIn("1 idle", header)
-        self.assertIn("p to pet", header)
-        # In a narrow pane, the tally outlasts the key hints.
-        narrow = caffe["header"](state, 100, 60)
-        self.assertIn("brewing", narrow)
-        self.assertNotIn("pet", narrow)
+        top = caffe["top_edge"](state, 100, 120)
+        self.assertIn("2 brewing", top)
+        self.assertIn("1 idle", top)
+        self.assertIn("awake", top)
+        self.assertIn("p to pet", caffe["bottom_edge"](state, 120))
+        # In a narrow pane, the tally outlasts the awake time, and the hints shorten.
+        narrow = caffe["top_edge"](state, 100, 36)
+        self.assertIn("2 brewing", narrow)
+        self.assertNotIn("awake", narrow)
+        self.assertIn("q quit", caffe["bottom_edge"](state, 30))
+        for width in (120, 36, 20):
+            self.assertEqual(caffe["visible_len"](caffe["top_edge"](state, 100, width)) + 1, width)
+            self.assertEqual(caffe["visible_len"](caffe["bottom_edge"](state, width)), width)
 
         state["gfx"] = False
         out = io.StringIO()
