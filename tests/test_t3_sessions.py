@@ -155,7 +155,7 @@ class T3SessionTests(unittest.TestCase):
         self.poll(state, NOW + 5)  # seconds later, not 30: T3 Code said so
         self.assertEqual(caffe["session_state"](state, "t3:work", NOW + 5)[0], "ready")
         self.assertIn("Order up! Codex is waiting for you", state["toast"][0])
-        self.assertEqual(state["visit"], "t3:work")
+        self.assertEqual(state["visit"], ("t3:work", "ready"))
 
     def test_closing_a_session_serves_it_but_a_forgotten_one_just_leaves(self):
         self.thread("work", "codex", runs=[("running", NOW - 30, None)])

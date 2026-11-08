@@ -46,10 +46,11 @@ after them.
   so you can keep an eye on your agents from another tab.
 - **A barista cat.** A random name and coat each launch. It lives on the strip
   of table below the cards: it walks about, grooms, yawns and naps when things
-  are quiet. It leaps up to sniff each new order and to check on ready ones,
-  and while an order is ready it sits up and looks at you instead of napping.
-  It knocks every finished cup off the table, and if you leave a ready order
-  until it goes cold, it eats the biscuit.
+  are quiet. When a new order comes in, it trots over and looks up at it. When
+  an order is ready, it sits below it, raises a paw and calls out `mrrp!`, then
+  waits with you instead of napping. It leaps up onto the cards to knock every
+  finished cup off the table, and if you leave a ready order until it goes
+  cold, to eat the biscuit.
 - **Pet the cat** with `p`. It purrs.
 - **Feed the cat** with `f`. It munches a fish treat, up to three every ten
   minutes before it's full.

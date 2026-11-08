@@ -95,7 +95,7 @@ class CardTests(unittest.TestCase):
         state = bar()
         poll(state, 5, {app: ("vscode", "app:VS Code", 0, 4, 64)})
         self.assertEqual(state["toast"][0], "VS Code opened a tab ☕")
-        self.assertEqual(state["visit"], app)  # the cat goes to sniff it
+        self.assertEqual(state["visit"], (app, "new"))  # the cat goes to look
         self.assertEqual(
             caffe["cup_look"](state, app, 6, 1.0)[:3],
             ("latte", caffe["DRINKS"]["vscode"][2], "pour"),
@@ -122,7 +122,7 @@ class CardTests(unittest.TestCase):
             state = bar()
             poll(state, 6, {1: ("codex", "ttys001", 0, 0, 0)}, cwds)
             self.assertEqual(state["toast"][0], toast)
-            self.assertEqual(state["visit"], 1)  # the cat goes to have a look
+            self.assertEqual(state["visit"], (1, "new"))  # the cat goes to have a look
 
     def test_a_finished_session_is_served_and_counted(self):
         state = bar(live={1: ("codex", "ttys001", 5, 0, 0)}, projects={1: "caffe"})

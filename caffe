@@ -6,8 +6,8 @@ gets a card: a cup of coffee, its project, and what it's doing. Brewing coffee
 steams and swirls as it's stirred; a session that finished its turn is ready, with
 a biscuit on the saucer; one left alone goes cold. Ready orders come first.
 When a session ends, its cup drains and the barista cat knocks it off the
-table. The cat also sniffs new orders, chases the odd mouse, and naps when the
-bar is quiet. Stray cats drop by now and then, and at 14:30 there's fika.
+table. The cat also calls out ready orders, chases the odd mouse, and naps when
+the bar is quiet. Stray cats drop by now and then, and at 14:30 there's fika.
 
 On battery at 20% or less, the display may sleep; agents keep running.
 
@@ -77,8 +77,9 @@ LOW_BATTERY, BATTERY_POLL_S = 20, 30.0  # % at which the display may sleep
 MOUSE_ODDS, GUEST_ODDS = 1 / 100, 1 / 300  # per poll: a mouse every ~5 min, a guest every ~15
 CHASE_SPEED, ERRAND_SPEED, TREATS_PER_10_MIN = 15.0, 11.0, 3
 NIBBLE_ODDS, BUN_BITES = 1 / 120, 4  # per poll at fika: a bite every ~6 min, gone in four
-BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss", "crouch", "leap")  # finished first
+BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss", "meow", "crouch", "leap")  # finished first
 CROUCH_S = 0.25  # the cat gathers itself before it leaps
+MEOW_S = 2.4  # how long the cat calls out a ready order
 
 QUIPS = [
     "Brewing tokens, one sip at a time.",
@@ -920,8 +921,12 @@ def cat_face(cx, cy, *, side=False, closed=False):
     }
 
 
-def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=0):  # noqa: PLR0913
+def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=0, *, up=False, call=False):  # noqa: PLR0913
+    """Sitting up. It can look `up` at a card, or `call` to it: a meow and a
+    paw raised towards it."""
     pose = cat_face(28, 22, closed=closed or bool(groom) or yawn)
+    if up or call:
+        pose["eyes"] = [(x, y - 2) for x, y in pose["eyes"]]
     sway = 3 * math.sin(tail * math.pi / 4)
     pose.update(
         tail=curve(((35, 42), (50 + sway, 45), (48 + sway, 28), (43, 31)), 2.5),
@@ -940,6 +945,10 @@ def cat_sit(tail=0, closed=False, groom=0, yawn=False, slap=0):  # noqa: PLR0913
         pose["paws"][0] = ellipse(px, py, 3.2, 2.2)
     if yawn:
         pose["mouth"] = ellipse(28, 28, 2.2, 2.8)
+    if call:
+        pose["legs"] = [capsule(21, 35, 11, 15, 2.4)]
+        pose["paws"][0] = ellipse(10.5, 13.5, 3, 2.5)
+        pose["mouth"] = ellipse(28, 27.5, 1.6, 1.9)
     return pose
 
 
@@ -1026,6 +1035,8 @@ CAT_POSES = {
     "groom": lambda paw: cat_sit(groom=paw),
     "slap": lambda stage: cat_sit(slap=stage),
     "yawn": lambda: cat_sit(yawn=True),
+    "look": lambda tail: cat_sit(tail, up=True),
+    "meow": lambda: cat_sit(call=True),
     "hiss": cat_hiss,
     "walk": cat_walk,
     "nap": cat_nap,
@@ -1279,10 +1290,10 @@ class Gallery:
 
 class Cat:
     """The barista cat. It lives on the strip of table below the cards: walks,
-    grooms, yawns, and naps when the bar is quiet. It goes up to the cards to
-    sniff new orders, check on ready ones and knock finished cups off the
-    table. `x` is the column of its middle, `y` how many rows above the strip
-    it is."""
+    grooms, yawns, and naps when the bar is quiet. It looks up at new orders
+    and calls out ready ones from below, and leaps up to the cards to knock
+    finished cups off the table. `x` is the column of its middle, `y` how many
+    rows above the strip it is."""
 
     MIN_X = 5  # how close its middle gets to the frame's sides
 
@@ -1297,6 +1308,7 @@ class Cat:
         self.distance = 0.0  # the walking cycle follows the paws' distance over the table
         self.plan, self.mode, self.until = [], "nap", now + 4
         self.pets, self.petted_at, self.target = 0, 0.0, None
+        self.errand = None  # why it's off to its target: "new", "ready", "biscuit" or "knock"
         self.fed, self.chasing, self.sleepy = [], False, False
 
     @property
@@ -1358,7 +1370,7 @@ class Cat:
         if home is not None:
             self.plan = [("nap", u(20, 40)), ("sit", 1.5), ("groom", u(2, 4))]
         elif self.target is not None:
-            self.plan = [("sit", u(1.5, 2.5))]  # a sniff at the cup
+            self.plan = [("look", u(2, 3))]  # it looks up at the cup
         elif waiting:  # an order is ready: it sits up and looks at you
             self.plan = [("sit", u(4, 8)), ("groom", u(1, 2))]
         elif calm and self.x >= free_x and random.random() < (0.8 if self.sleepy else 0.5):
@@ -1464,6 +1476,8 @@ class Cat:
             "nap": (("nap", int(now * 2) % 8), mirrored),
             "groom": (("groom", 1 + int(now * 3) % 2), False),
             "yawn": (("yawn",), False),
+            "look": (("look", int(now * 1.5) % 8), False),
+            "meow": (("meow",), False),
             "purr": (("sit", int(now * 4) % 8, True), False),
             "eat": chew,
             "nibble": chew,
@@ -1493,6 +1507,11 @@ class Cat:
                 col = round(left) + (cols - 2 if not flip else 1) + i
                 if 0 <= r < rows and 0 <= col < len(art[r]):
                     art[r][col] = f"{DIM}{ch}{RESET}"
+        if self.mode == "meow" and not self.y:  # by its head, on whichever side has room
+            at = round(left) + cols if round(left) + cols + 5 <= len(art[0]) else round(left) - 5
+            for i, ch in enumerate("mrrp!"[: int((now - self.until + MEOW_S) * 8)]):
+                if 0 <= at + i < len(art[0]):
+                    art[0][at + i] = f"{GOLD}{ch}{RESET}"
 
 
 # ---- The table. Each session is a card: its cup, and three lines beside it
@@ -1670,12 +1689,18 @@ class Frame:
 
 
 def cat_visit(state, now):
-    """When the cat reaches a finished cup, it swats it off the table. At a
-    ready order that went cold, it helps itself to the biscuit."""
+    """When the cat reaches a finished cup, it swats it off the table. Below a
+    ready order, it meows and reaches up for it; at one that went cold, it
+    helps itself to the biscuit. A new order it just looks up at."""
     cat = state["cat"]
     if cat.target is None or cat.mode in ("walk", "crouch", "leap"):  # not there yet
         return
-    pid = cat.target
+    pid, why = cat.target, cat.errand
+    if why in ("new", "ready"):
+        cat.target = cat.errand = None
+        if why == "ready":
+            cat.do("meow", now, MEOW_S, ("sit", random.uniform(3, 5)))
+        return
     if pid in state["leaving"] and pid not in state["knocked"]:
         cat.slap(now)
         state["knocked"][pid] = now + 0.3  # the paw lands a moment after the swing starts
@@ -1687,7 +1712,7 @@ def cat_visit(state, now):
             now + 4,
         )
     elif pid not in state["knocked"]:
-        cat.target = None
+        cat.target = cat.errand = None
         if pid in state.get("biscuits", ()):
             state["biscuits"].discard(pid)
             cat.do("nibble", now, 1.6, ("sit", 0.8))
@@ -1871,8 +1896,8 @@ def footer(state, frame):
 
 
 def aim_cat(state, now, spots, lane_top):
-    """Send the cat up to a finished cup to knock it off, or to a card it wants
-    to check on."""
+    """Send the cat up to a finished cup to knock it off, or to a cold order's
+    biscuit. New and ready orders it sees to from the strip, below the cup."""
     cat = state["cat"]
     # When the cards reflow, the strip moves. A cat on it moves along; one up
     # among the cards stays where it is on screen, though never above them.
@@ -1887,17 +1912,22 @@ def aim_cat(state, now, spots, lane_top):
     state["lane_top"] = lane_top
     visit = state.pop("visit", None)
     if cat.target not in spots:
-        cat.target = None
+        cat.target = cat.errand = None
     if cat.mode in BUSY_MODES:
         return
     pending = [p for p in spots if p in state["leaving"] and p not in state["knocked"]]
-    target = cat.target if cat.target in pending else next(iter(pending), visit)
+    if pending:
+        visit = (cat.target if cat.target in pending else pending[0]), "knock"
+    target, why = visit or (None, None)
     if target in spots:
-        _, row, text_at = spots[target]
-        goal = (text_at + 3, row - lane_top)  # beside the cup, over the card's words
+        x, row, text_at = spots[target]
+        if why in ("knock", "biscuit"):
+            goal = (text_at + 3, row - lane_top)  # up beside the cup, over the card's words
+        else:
+            goal = (max(x, (x + text_at) / 2 - 1), 0)  # on the strip, below the cup
         if cat.target != target or (cat.goal, cat.goal_y) != goal:
             cat.go(*goal)
-        cat.target = target
+        cat.target, cat.errand = target, why
 
 
 def render_lane(state, now, frame, home=None):
@@ -2070,7 +2100,7 @@ def take_orders(state, live, now):
         state["first_seen"][pid] = now
         if not state["initialized"]:
             continue
-        state["visit"] = pid
+        state["visit"] = pid, "new"
         kind, source = live[pid][:2]
         if kind == COPILOT_SESSION_KIND:
             message = f"New session: {source} ☕"
@@ -2092,7 +2122,7 @@ def take_orders(state, live, now):
             continue
         dur = now - started
         state["leaving"][pid] = (kind, tty_name, now, started)
-        state["visit"] = pid
+        state["visit"] = pid, "knock"
         name = DRINKS[kind][0]
         if tty_name.startswith("app:"):  # an app's latte goes, but it's no order
             state["toast"] = (f"{name} settled its tab ✔", now + 5)
@@ -2104,18 +2134,18 @@ def take_orders(state, live, now):
 
 
 def notice_turns(state, now):
-    """A session that finished its turn is ready: the cat goes to have a look.
-    Left until it goes cold, the cat helps itself to the biscuit."""
+    """A session that finished its turn is ready: the cat goes and calls out
+    for you. Left until it goes cold, the cat helps itself to the biscuit."""
     before = state.get("words", {})  # each session's state at the last poll
     biscuits = state.setdefault("biscuits", set())
     words = {p: session_state(state, p, now)[0] for p in brewable(state)}
     for pid, word in words.items():
         was, kind = before.get(pid), state["live"][pid][0]
         if word == "ready" and was not in (None, "ready"):
-            state["visit"] = pid
+            state["visit"] = pid, "ready"
             state["toast"] = (f"Order up! {who(state, pid, kind)} is waiting for you.", now + 6)
         elif word == "cold" and was == "ready":
-            state["visit"] = pid
+            state["visit"] = pid, "biscuit"
             biscuits.add(pid)
     biscuits.intersection_update(state["live"])
     state["words"] = words
