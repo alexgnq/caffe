@@ -30,9 +30,12 @@ after them.
 - **Copilot app sessions.** Running local Copilot app sessions and chats get
   their own cards, labelled `Agent` with the session's title. They brew while
   running; idle sessions disappear without being served.
-- **Open apps.** The Codex, Copilot, Claude and VS Code apps are listed below
-  the cards, each with its own icon, read from the app, and the CPU and RAM of
-  the app and everything it runs.
+- **Lattes for open apps.** The Codex, Copilot, Claude and VS Code apps each
+  get a latte, after the sessions: a tall glass on a coaster in the app's
+  colour, with the app's own icon and its CPU and RAM, counting everything the
+  app runs. The foam swirls while the app is busy. Opening an app pours its
+  latte in; closing it settles its tab, and the cat knocks the empty glass off
+  the table. Apps don't count as orders.
 - **At a glance.** The header and the terminal tab's title count what's ready,
   brewing, idle and just served, such as `☕ 1 ready · 2 brewing`, so you can
   keep an eye on your agents from another tab.

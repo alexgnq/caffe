@@ -68,6 +68,17 @@ class CatCleanupTests(unittest.TestCase):
                     break
         self.assertEqual(finished, state["knocked"].keys())
 
+    def test_the_cat_knocks_a_closed_apps_latte_off_too(self):
+        app = (40, "codex")
+        state = bar(leaving={app: ("codex", "app:Codex", 0, -10)})
+        with patch("random.random", return_value=0.99):
+            for tick in range(1, 201):
+                _, pics = caffe["render"](state, tick * 0.12, (80, 24))
+                if app in state["knocked"]:
+                    break
+        self.assertIn(app, state["knocked"])
+        self.assertIn("knocked Codex's latte off", state["toast"][0])
+
     def test_graphics_cup_waits_for_swat_but_text_cup_expires(self):
         state = {"leaving": {1: ("codex", "ttys001", 0, -10)}, "knocked": {}, "gfx": True}
         self.assertFalse(caffe["gone"](state, 1, 100))

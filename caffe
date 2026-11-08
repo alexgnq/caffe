@@ -11,8 +11,8 @@ bar is quiet. Stray cats drop by now and then, and at 14:30 there's fika.
 
 On battery at 20% or less, the display may sleep; agents keep running.
 
-Open apps are listed with their CPU and RAM. Running local Copilot app sessions
-and chats also get cards labelled "Agent"; idle ones are hidden.
+Each open app gets a latte, with its icon, CPU and RAM. Running local Copilot
+app sessions and chats also get cards labelled "Agent"; idle ones are hidden.
 
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
 kitty, WezTerm or a recent iTerm2. Other terminals get the cards without pictures.
@@ -387,7 +387,7 @@ def is_working(session):
 
 
 def is_app(session):
-    """An open application, listed below the cards, rather than a session with a cup."""
+    """An open application, which gets a latte, rather than a session with a cup."""
     return session[0] != COPILOT_SESSION_KIND and session[1].startswith("app:")
 
 
@@ -710,9 +710,59 @@ def draw_cup(img, glaze, look, frame):
 
 
 KNOCK_FRAMES, KNOCK_S = 12, 1.0
+LATTE, LATTE_FOAM = (214, 168, 118), (238, 218, 190)
 
 
-def knock_sprite(glaze, frame, k=1.0):
+def latte_sprite(glaze, look, frame=0, k=1.0):
+    """An open app's latte, from above: a tall glass on a coaster in its colour."""
+    img = Img(math.ceil(6 * k), math.ceil(3 * k), k)
+    draw_latte(img, glaze, look, frame)
+    return img
+
+
+def draw_latte(img, glaze, look, frame):
+    cx, cy = CUP_X, CUP_Y
+    img.fill(circle(cx + 1.6, cy + 2.2, 19.5), INK, 0.35)
+    img.fill(circle(cx, cy, 19), mix(glaze, INK, 0.25))  # the coaster
+    img.fill(circle(cx, cy, 18.2), glaze)
+    img.fill(ring(cx, cy, 16.4, 0.7), mix(glaze, WHITE, 0.45), 0.8)
+    img.fill(circle(cx + 1.2, cy + 1.6, 14), INK, 0.3)
+    img.fill(circle(cx, cy, 14), (226, 234, 240), 0.6)  # the glass's rim
+    img.fill(ring(cx, cy, 13.3, 1.2), WHITE, 0.7)
+    inside = circle(cx, cy, 12)
+    glass = mix(glaze, WHITE, 0.65)  # the coaster, through an empty glass
+    if look == "empty" or (look == "drain" and frame >= 2):
+        img.fill(inside, glass, 0.6)
+        img.fill(ring(cx, cy, 9.5, 1.6), LATTE_FOAM, 0.55)  # foam left on the glass
+    elif look in ("pour", "drain"):
+        img.fill(inside, glass, 0.6)
+        r = 12 * ((frame + 1) / POUR_FRAMES if look == "pour" else 0.6)
+        img.fill(circle(cx, cy, r), LATTE)
+        if look == "pour":  # milk landing in the middle
+            img.fill(circle(cx, cy, 1.8), WHITE)
+    else:
+        img.fill(inside, LATTE)
+        img.fill(ring(cx, cy, 11.2, 1.6), LATTE_FOAM, 0.9)
+        if look == "busy":  # stirred, like a brewing cup
+            turn = frame / STIR_FRAMES * 2 * math.pi
+            for arm in (0, math.pi):
+                pts = [
+                    (
+                        cx + math.cos(turn + arm + t * 0.55) * r,
+                        cy + math.sin(turn + arm + t * 0.55) * r,
+                    )
+                    for t, r in ((t, 1.2 + t * 1.05) for t in range(9))
+                ]
+                img.fill(path(pts, 1.0), FOAM, 0.9)
+        else:  # a rosetta
+            for i in range(5):
+                y = cy - 6 + i * 2.6
+                img.fill(ellipse(cx, y, 5.4 - i * 0.9, 1.3), FOAM)
+            img.fill(capsule(cx, cy - 7.5, cx, cy + 7, 0.45), FOAM)
+    img.fill(path(((cx - 10, cy - 6), (cx - 7, cy - 10), (cx - 2, cy - 12.6)), 0.8), WHITE, 0.6)
+
+
+def knock_sprite(glaze, frame, k=1.0, drink="cup"):
     """A cup the cat pushed: it slides off to the left, spins, and drops off the
     table. The picture is 4 cols wider than a cup, which starts at its right."""
     img = Img(math.ceil(10 * k), math.ceil(3 * k), k)
@@ -720,7 +770,7 @@ def knock_sprite(glaze, frame, k=1.0):
     fall = max(0.0, t - 0.4) / 0.6
     img.move(-t * 2.2, (CUP_X, CUP_Y), (32 - 26 * min(1.0, t / 0.6), 0), scale=1 - 0.75 * fall)
     img.fade = 1 - fall
-    draw_cup(img, glaze, "empty", 0)
+    (draw_latte if drink == "latte" else draw_cup)(img, glaze, "empty", 0)
     return img
 
 
@@ -1068,6 +1118,7 @@ SPRITES = {
     "bun": bun_sprite,
     "hearts": hearts_sprite,
     "cup": cup_sprite,
+    "latte": latte_sprite,
     "knock": knock_sprite,
     "cat": cat_sprite,
     "icon": icon_sprite,
@@ -1338,65 +1389,88 @@ def trim(text, width):
 
 
 def card_order(state, now):
-    """Ready orders first, then the others in the order they arrived. Finished
-    cups keep their place until the cat clears them."""
-    started = {p: s[2] for p, s in state["live"].items() if not is_app(s)}
-    started.update(
-        (p, cup[3])
-        for p, cup in state["leaving"].items()
-        if not is_app(cup) and not gone(state, p, now)
+    """Ready orders first, then the other sessions in the order they arrived,
+    then the open apps. Finished cups keep their place until the cat clears them."""
+    cards = {p: (is_app(s), s[2]) for p, s in state["live"].items()}
+    cards.update(
+        (p, (is_app(cup), cup[3])) for p, cup in state["leaving"].items() if not gone(state, p, now)
     )
 
     def key(pid):
         ready = pid in state["live"] and session_state(state, pid, now)[0] == "ready"
-        return not ready, started[pid]
+        app, started = cards[pid]
+        return app, not ready, started
 
-    return sorted(started, key=key)
+    return sorted(cards, key=key)
+
+
+def poured(state, pid, now):
+    """How far into pouring a new cup is, or None once it's full. Sessions and
+    apps already there at startup are served full."""
+    seen = state["first_seen"].get(pid, 0)
+    if state["live"][pid][0] == COPILOT_SESSION_KIND or seen <= state["start"] + 1:
+        return None
+    return (now - seen) / POUR_S if now - seen < POUR_S else None
 
 
 def cup_look(state, pid, now, k):
-    """The sprite key for a card's cup at this moment."""
+    """The sprite key for a card's cup, or an app's latte, at this moment."""
     if pid in state["leaving"]:
-        kind, _, ended, _ = state["leaving"][pid]
+        cup = state["leaving"][pid]
+        drink, ended = ("latte" if is_app(cup) else "cup"), cup[2]
         knocked = state["knocked"].get(pid, now + 1)
         if knocked <= now:
             frame = min(KNOCK_FRAMES - 1, int((now - knocked) / KNOCK_S * KNOCK_FRAMES))
-            return ("knock", SERVED_GLAZE, frame, k)
-        return ("cup", SERVED_GLAZE, "drain", min(2, int((now - ended) / DRAIN_S * 3)), k)
-    kind, _, _, cpu, _ = state["live"][pid]
+            return ("knock", SERVED_GLAZE, frame, k, drink)
+        return (drink, SERVED_GLAZE, "drain", min(2, int((now - ended) / DRAIN_S * 3)), k)
+    session = state["live"][pid]
+    kind, _, _, cpu, _ = session
     glaze = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][2]
-    seen = state["first_seen"].get(pid, 0)
-    # Sessions already running at startup are served full; new ones pour in.
-    if kind != COPILOT_SESSION_KIND and seen > state["start"] + 1 and now - seen < POUR_S:
-        return ("cup", glaze, "pour", int((now - seen) / POUR_S * POUR_FRAMES), k)
+    drink = "latte" if is_app(session) else "cup"
+    pour = poured(state, pid, now)
+    if pour is not None:
+        return (drink, glaze, "pour", int(pour * POUR_FRAMES), k)
+    stir = int(now / (0.075 if cpu >= BUSY_CPU else 0.15)) % STIR_FRAMES  # faster when busier
+    if drink == "latte":
+        return (
+            ("latte", glaze, "busy", stir, k)
+            if cpu >= WORKING_CPU
+            else ("latte", glaze, "open", 0, k)
+        )
     word = session_state(state, pid, now)[0]
-    if word == "brewing":  # stirred faster when the agent works harder
-        frame = int(now / (0.075 if cpu >= BUSY_CPU else 0.15)) % STIR_FRAMES
-        return ("cup", glaze, "brewing", frame, k)
-    return ("cup", glaze, word, 0, k)
+    return ("cup", glaze, word, stir if word == "brewing" else 0, k)
 
 
-def card_lines(state, pid, now, width):
-    """A card's three lines: name and project, status, and a note."""
+def card_lines(state, pid, now, width, icon=False):
+    """A card's three lines: name and project, status, and a note. An app's
+    card leaves room for its `icon` before its name."""
     leaving = pid in state["leaving"]
     cup = state["leaving"][pid] if leaving else state["live"][pid]
     kind, source = cup[:2]
     style_kind = "copilot" if kind == COPILOT_SESSION_KIND else kind
     name, color, _ = DRINKS[style_kind]
+    app = is_app(cup)
     if kind == COPILOT_SESSION_KIND:
         name, where = "Agent", source
+    elif app:
+        where = "app"
     else:
         where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+    gap = "   " if app and icon else ""
+    width -= len(gap)
     name = trim(name, width)
-    title = f"{color}{BOLD}{name}{RESET}"
+    title = f"{gap}{color}{BOLD}{name}{RESET}"
     if width - len(name) > 2:
         title += f" {DIM}{trim(where, width - len(name) - 1)}{RESET}"
     if leaving:
         ended, started = cup[2], cup[3]
-        return [title, f"{GOLD}✔ served{RESET} {DIM}{fmt_since(ended - started)}{RESET}", ""]
-    seen = state["first_seen"].get(pid, 0)
-    if kind != COPILOT_SESSION_KIND and seen > state["start"] + 1 and now - seen < POUR_S:
-        return [title, f"{GOLD}pouring…{RESET}", f"{DIM}new order{RESET}"]
+        done = "closed" if app else "served"
+        return [title, f"{GOLD}✔ {done}{RESET} {DIM}{fmt_since(ended - started)}{RESET}", ""]
+    if poured(state, pid, now) is not None:
+        return [title, f"{GOLD}pouring…{RESET}", f"{DIM}{'opened' if app else 'new order'}{RESET}"]
+    if app:
+        busy = "busy" if cup[3] >= WORKING_CPU else "open"
+        return [title, f"{DIM}{busy} {cup[3]:.0f}% · {fmt_mem(cup[4])}{RESET}", ""]
     word, since = session_state(state, pid, now)
     took = fmt_since(now - since)
     status = {
@@ -1449,8 +1523,12 @@ def cat_visit(state, now):
         cat.slap(now)
         state["knocked"][pid] = now + 0.3  # the paw lands a moment after the swing starts
         state["broken"] += 1
-        who = DRINKS[state["leaving"][pid][0]][0]
-        state["toast"] = (f"{cat.name} knocked {who}'s cup off the table.", now + 4)
+        cup = state["leaving"][pid]
+        drink = "latte" if is_app(cup) else "cup"
+        state["toast"] = (
+            f"{cat.name} knocked {DRINKS[cup[0]][0]}'s {drink} off the table.",
+            now + 4,
+        )
     elif pid not in state["knocked"]:
         cat.target = None
         if pid in state.get("biscuits", ()):
@@ -1605,7 +1683,12 @@ def render_cards(state, now, frame, room_rows):
             look = cup_look(state, pid, now, k)
             left = x - round(4 * k) if look[0] == "knock" else x
             frame.pics[("cup", pid)] = (look, left, top + y, 2)
-        for j, line in enumerate(card_lines(state, pid, now, card_w - text_at - 1)[:n_lines]):
+            cup = state["leaving"].get(pid) or state["live"][pid]
+            if is_app(cup):  # the app's own icon, before its name
+                icon = ("icon", pid[0], cup[0], state.get("png", True))
+                frame.pics[("icon", pid)] = (icon, x + text_at, top + y, 2)
+        lines = card_lines(state, pid, now, card_w - text_at - 1, icon=frame.gfx)
+        for j, line in enumerate(lines[:n_lines]):
             rows[y + j].append((x + text_at, line))
     frame.out += [runs(cells).rstrip() for cells in rows]
     return spots
@@ -1627,26 +1710,9 @@ def render_empty(state, now, frame):
 
 
 def footer(state, frame):
-    """A line below the cards: how many didn't fit, and the open apps, each
-    with its icon."""
-    row, line = len(frame.out), "  "
-    if state.get("hidden"):
-        more = len(state["hidden"])
-        line += f"{DIM}+{more} more order{'s' * (more > 1)}{RESET}   "
-    apps = sorted(
-        ((key, s) for key, s in state["live"].items() if is_app(s)), key=lambda app: app[1][2]
-    )
-    if apps:
-        line += f"{DIM}apps{RESET}"
-    for key, (kind, _, _, cpu, ram_mb) in apps:
-        line += "  "
-        if frame.gfx:
-            icon = ("icon", key[0], kind, state.get("png", True))
-            frame.pics[("icon", key)] = (icon, visible_len(line), row, 2)
-            line += "   "
-        name, color, _ = DRINKS[kind]
-        line += f"{color}{name}{RESET} {DIM}{cpu:.0f}% · {fmt_mem(ram_mb)}{RESET} "
-    frame.out.append(line.rstrip())
+    """A line below the cards, saying how many didn't fit."""
+    more = len(state.get("hidden", ()))
+    frame.out.append(f"  {DIM}+{more} more order{'s' * (more > 1)}{RESET}" if more else "")
 
 
 def aim_cat(state, now, spots, lane_top):
@@ -1799,19 +1865,22 @@ def update(state):
 
 
 def take_orders(state, live, now):
-    """New sessions pour in; finished ones are served. Apps come and go quietly."""
+    """New sessions pour in; finished ones are served. Open apps get a latte and
+    run a tab, which they settle when they close."""
     fresh = live.keys() - state["live"].keys()
     projects = state.setdefault("projects", {})
     terminal = [p for p in fresh if not is_app(live[p]) and live[p][0] != COPILOT_SESSION_KIND]
     projects.update((p, project_name(path)) for p, path in scan_cwds(terminal).items())
     for pid in fresh:
         state["first_seen"][pid] = now
-        if not state["initialized"] or is_app(live[pid]):
+        if not state["initialized"]:
             continue
         state["visit"] = pid
         kind, source = live[pid][:2]
         if kind == COPILOT_SESSION_KIND:
             message = f"New session: {source} ☕"
+        elif is_app(live[pid]):
+            message = f"{DRINKS[kind][0]} opened a tab ☕"
         else:
             where = f" in {projects[pid]}" if pid in projects else f" on {source}"
             message = f"New order: {DRINKS[kind][0]}{where} ☕"
@@ -1819,7 +1888,7 @@ def take_orders(state, live, now):
     for pid in state["live"].keys() - live.keys():
         kind, tty_name, started, _, _ = state["live"][pid]
         state["first_seen"].pop(pid, None)
-        if kind == COPILOT_SESSION_KIND or tty_name.startswith("app:"):
+        if kind == COPILOT_SESSION_KIND:
             if state["cat"].target == pid:
                 state["cat"].target = None
             continue
@@ -1827,6 +1896,9 @@ def take_orders(state, live, now):
         state["leaving"][pid] = (kind, tty_name, now, started)
         state["visit"] = pid
         name = DRINKS[kind][0]
+        if tty_name.startswith("app:"):  # an app's latte goes, but it's no order
+            state["toast"] = (f"{name} settled its tab ✔", now + 5)
+            continue
         state["orders"][name] = state["orders"].get(name, 0) + 1
         state["agent_time"] += now - max(started, state["start"])  # while the bar was open
         state["longest"] = max(state["longest"], (dur, name))

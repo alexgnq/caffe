@@ -72,26 +72,52 @@ class CardTests(unittest.TestCase):
                 lines = caffe["card_lines"](state, pid, 5, width)
                 self.assertTrue(all(caffe["visible_len"](line) <= width for line in lines))
 
-    def test_apps_are_listed_below_the_cards_not_served_as_cups(self):
-        app = (40, "vscode")
-        state = bar(live={app: ("vscode", "app:VS Code", 0, 4, 64), 1: ("codex", "ttys1", 0, 0, 0)})
-        lines, pics = caffe["render"](state, 5, (96, 24))
-        footer = next(line for line in lines if "apps" in line)
-        self.assertIn("VS Code", footer)
-        self.assertIn("4% · 64M", footer)
-        self.assertNotIn(("cup", app), pics)
-        self.assertIn(("cup", 1), pics)
+    def test_apps_get_a_latte_after_the_sessions(self):
+        app, quiet = (40, "vscode"), (41, "copilot")
+        state = bar(
+            live={
+                app: ("vscode", "app:VS Code", 0, 4, 64),
+                quiet: ("copilot", "app:Copilot", 1, 0, 128),
+                1: ("codex", "ttys1", 5, 0, 0),
+            }
+        )
+        self.assertEqual(caffe["card_order"](state, 5), [1, app, quiet])
+        _, pics = caffe["render"](state, 5, (96, 24))
+        self.assertEqual(pics["cup", app][0][:3], ("latte", caffe["DRINKS"]["vscode"][2], "busy"))
+        self.assertEqual(pics["cup", quiet][0][2], "open")
+        self.assertEqual(pics["cup", 1][0][0], "cup")
+        title, usage, _ = caffe["card_lines"](state, app, 5, 22)
+        self.assertIn("VS Code", title)
+        self.assertTrue(title.endswith(f"{DIM}app{RESET}"))
+        self.assertEqual(usage, f"{DIM}busy 4% · 64M{RESET}")
+        self.assertIn("open 0% · 128M", caffe["card_lines"](state, quiet, 5, 22)[1])
         self.assertNotIn("app", caffe["tally"](state, 5))
+        for look in ("open", "busy", "pour", "drain", "empty"):
+            self.assertTrue(any(caffe["latte_sprite"]((1, 2, 3), look, 4).buf[3::4]), look)
 
-    def test_opening_and_closing_an_app_is_quiet(self):
+    def test_an_app_opens_a_tab_and_settles_it_when_it_closes(self):
         app = (40, "vscode")
         state = bar()
         poll(state, 5, {app: ("vscode", "app:VS Code", 0, 4, 64)})
-        self.assertIsNone(state["toast"])
+        self.assertEqual(state["toast"][0], "VS Code opened a tab ☕")
+        self.assertEqual(state["visit"], app)  # the cat goes to sniff it
+        self.assertEqual(
+            caffe["cup_look"](state, app, 6, 1.0)[:3],
+            ("latte", caffe["DRINKS"]["vscode"][2], "pour"),
+        )
         poll(state, 8, {})
-        self.assertNotIn(app, state["leaving"])
-        self.assertEqual(state["orders"], {})
-        self.assertIsNone(state["toast"])
+        self.assertIn(app, state["leaving"])  # its latte drains, and the cat knocks it off
+        self.assertEqual(state["orders"], {})  # but it's no order
+        self.assertEqual(state["agent_time"], 0.0)
+        self.assertEqual(state["toast"][0], "VS Code settled its tab ✔")
+        self.assertEqual(
+            caffe["cup_look"](state, app, 9, 1.0)[:3], ("latte", caffe["SERVED_GLAZE"], "drain")
+        )
+        self.assertIn("✔ closed", caffe["card_lines"](state, app, 9, 22)[1])
+        state["knocked"][app] = 10
+        knock = caffe["cup_look"](state, app, 10.5, 1.0)
+        self.assertEqual((knock[0], knock[-1]), ("knock", "latte"))
+        caffe["SPRITES"][knock[0]](*knock[1:])
 
     def test_new_order_toast_names_the_project_or_terminal(self):
         for cwds, toast in (
@@ -200,22 +226,23 @@ class AppIconTests(unittest.TestCase):
             os.close(read)
             os.close(write)
 
-    def test_apps_get_their_icon_before_their_name_with_graphics_only(self):
+    def test_an_apps_icon_goes_before_its_name_with_graphics_only(self):
         app = (40, "vscode")
         for gfx in (True, False):
             state = bar(live={app: ("vscode", "app:VS Code", 0, 4, 64)}, gfx=gfx)
             lines, pics = caffe["render"](state, 5, (96, 24))
-            line = next(line for line in lines if "apps" in line)
+            line = next(line for line in lines if "VS Code" in line)
+            plain = re.sub(r"\033\[[\d;]*m", "", line)
             if gfx:
                 key, col, row, _ = pics["icon", app]
                 self.assertEqual(key, ("icon", 40, "vscode", True))
                 self.assertEqual(lines[row], line)
-                plain = re.sub(r"\033\[[\d;]*m", "", line)
+                self.assertEqual(row, pics["cup", app][2])  # on the latte's first row
                 self.assertEqual(plain[col : col + 3], "   ")  # room for it
-                self.assertEqual(plain[col + 3 :].split()[0], "VS")
+                self.assertEqual(plain[col + 3 :].split()[:3], ["VS", "Code", "app"])
             else:
                 self.assertNotIn(("icon", app), pics)
-                self.assertIn("apps  VS Code", re.sub(r"\033\[[\d;]*m", "", line))
+                self.assertEqual(plain.split(), ["VS", "Code", "app"])
 
     def test_png_pictures_are_sent_for_the_terminal_to_decode(self):
         gallery = caffe["Gallery"]()

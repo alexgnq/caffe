@@ -175,17 +175,20 @@ class CopilotSessionTests(unittest.TestCase):
         self.assertEqual(set(state["live"]), {*agents, KEY})
         lines, pics = caffe["render"](state, 105, (96, 30))
         self.assertGreater(pics["cat"][3], pics["cup", KEY][3])  # the cat walks over the table
-        self.assertEqual({key for key in pics if key[0] == "cup"}, {("cup", 1), ("cup", KEY)})
+        drinks = {key[1]: pics[key][0][0] for key in pics if key[0] == "cup"}
+        self.assertEqual(
+            drinks, {1: "cup", KEY: "cup", (40, "copilot"): "latte", (50, "vscode"): "latte"}
+        )
         self.assertTrue(any("Agent" in line for line in lines))
-        self.assertTrue(any("Copilot" in line and "512M" in line for line in lines))
+        self.assertTrue(any("512M" in line for line in lines))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             caffe["receipt"](state, 105)
         self.assertIn("Still brewing", output.getvalue())
         self.assertNotIn("Fix widget", output.getvalue())
         self.update(state)
-        self.assertEqual(state["orders"], {"Codex": 1})
-        self.assertNotIn((40, "copilot"), state["leaving"])
+        self.assertEqual(state["orders"], {"Codex": 1})  # the apps' lattes are no orders
+        self.assertIn((40, "copilot"), state["leaving"])
         self.assertNotIn(KEY, state["leaving"])
 
 

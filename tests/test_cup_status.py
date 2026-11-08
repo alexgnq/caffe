@@ -167,12 +167,18 @@ class CupStatusTests(unittest.TestCase):
         poll(state, 101, {k: v for k, v in agents.items() if k != 1})
         self.assertIn("1 served", caffe["tally"](state, 101))
 
-    def test_an_empty_bar_has_no_tally(self):
+    def test_open_apps_alone_have_no_tally(self):
         state = bar()
         poll(state, 100, {(40, "codex"): ("codex", "app:Codex", 0, 30, 2048)})
         self.assertEqual(caffe["tally"](state, 100), "")
         lines, pics = caffe["render"](state, 100, (96, 24))
         self.assertNotIn("brewing", lines[0])
+        self.assertEqual(pics["cup", (40, "codex")][0][0], "latte")
+
+    def test_an_empty_bar_has_a_clean_cup(self):
+        state = bar()
+        poll(state, 100, {})
+        lines, pics = caffe["render"](state, 100, (96, 24))
         self.assertTrue(any("No orders yet" in line for line in lines))
         self.assertEqual(pics["idle"][0][2], "empty")
 
