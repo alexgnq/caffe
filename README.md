@@ -31,7 +31,8 @@ after them.
   their own cards, labelled `Agent` with the session's title. They brew while
   running; idle sessions disappear without being served.
 - **Open apps.** The Codex, Copilot, Claude and VS Code apps are listed below
-  the cards, with the CPU and RAM of the app and everything it runs.
+  the cards, each with its own icon, read from the app, and the CPU and RAM of
+  the app and everything it runs.
 - **At a glance.** The header and the terminal tab's title count what's ready,
   brewing, idle and just served, such as `☕ 1 ready · 2 brewing`, so you can
   keep an eye on your agents from another tab.

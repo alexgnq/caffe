@@ -26,6 +26,7 @@ import base64
 import datetime
 import math
 import os
+import plistlib
 import random
 import re
 import select
@@ -263,6 +264,46 @@ def project_name(path):
         return "~"
     name = os.path.basename(path.rstrip("/")) or path
     return re.sub(r"[\x00-\x1f\x7f]", "", name)
+
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def icns_png(data, want=64):
+    """The smallest PNG in an .icns file that is at least `want` pixels wide,
+    or the largest one if none is. None if it holds no PNGs."""
+    pngs, at = [], 8
+    while data[:4] == b"icns" and at + 8 <= len(data):
+        size = int.from_bytes(data[at + 4 : at + 8], "big")
+        body = data[at + 8 : at + size]
+        if size < 8:
+            break
+        if body[:8] == PNG_MAGIC and len(body) >= 24:
+            pngs.append((int.from_bytes(body[16:20], "big"), body))
+        at += size
+    big = sorted(png for png in pngs if png[0] >= want)
+    return (big[0] if big else max(pngs, default=(0, None)))[1]
+
+
+def app_icon(pid):
+    """The running app's own icon, as PNG, read from its bundle. None if it
+    can't be found."""
+    try:
+        exe = subprocess.run(
+            ["/bin/ps", "-o", "comm=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        ).stdout.strip()
+        bundle = Path(exe[: exe.index(".app/") + 4])
+        with open(bundle / "Contents" / "Info.plist", "rb") as info:
+            name = plistlib.load(info).get("CFBundleIconFile") or "AppIcon"
+        if not name.endswith(".icns"):
+            name += ".icns"
+        return icns_png((bundle / "Contents" / "Resources" / name).read_bytes())
+    except (OSError, ValueError, subprocess.SubprocessError, plistlib.InvalidFileException):
+        return None
 
 
 def agent_sessions(out, commands, now):
@@ -1001,6 +1042,26 @@ def bun_sprite(kind, bites=0):
     return img
 
 
+class Png:
+    """A ready-made PNG picture, shown `cols` x `rows` cells big."""
+
+    def __init__(self, data, cols, rows):
+        self.data, self.cols, self.rows = data, cols, rows
+
+
+def icon_sprite(pid, kind, png=True):
+    """An open app's icon, 2 cols x 1 row: its own, if the terminal can show a
+    PNG, or a tile in its colour."""
+    data = app_icon(pid) if png else None
+    if data:
+        return Png(data, 2, 1)
+    img, glaze = Img(2, 1), DRINKS[kind][2]
+    img.fill(rbox(2, 2, 14, 14, 3.2), mix(glaze, INK, 0.3))
+    img.fill(rbox(2, 1.5, 14, 13, 3.2), glaze)
+    img.fill(rbox(4, 3.5, 12, 6, 1.2), mix(glaze, WHITE, 0.45), 0.8)
+    return img
+
+
 SPRITES = {
     "mouse": mouse_sprite,
     "treat": treat_sprite,
@@ -1009,6 +1070,7 @@ SPRITES = {
     "cup": cup_sprite,
     "knock": knock_sprite,
     "cat": cat_sprite,
+    "icon": icon_sprite,
 }
 
 
@@ -1025,10 +1087,14 @@ class Gallery:
         if key not in self.images:
             img = SPRITES[key[0]](*key[1:])
             iid = self.BASE_ID + len(self.images)
-            data = base64.standard_b64encode(zlib.compress(bytes(img.buf))).decode()
+            if isinstance(img, Png):  # the terminal decodes it
+                payload, fmt = img.data, "f=100"
+            else:
+                payload, fmt = zlib.compress(bytes(img.buf)), f"f=32,o=z,s={img.w},v={img.h}"
+            data = base64.standard_b64encode(payload).decode()
             chunks = [data[i : i + 4096] for i in range(0, len(data), 4096)] or [""]
             self.uploads[key] = "".join(
-                f"\033_G{f'a=t,q=2,f=32,o=z,i={iid},s={img.w},v={img.h},' if n == 0 else ''}"
+                f"\033_G{f'a=t,q=2,{fmt},i={iid},' if n == 0 else ''}"
                 f"m={int(n < len(chunks) - 1)};{chunk}\033\\"
                 for n, chunk in enumerate(chunks)
             )
@@ -1560,20 +1626,27 @@ def render_empty(state, now, frame):
     ]
 
 
-def footer(state, width):
-    """Open apps, and how many cards didn't fit."""
-    parts = []
+def footer(state, frame):
+    """A line below the cards: how many didn't fit, and the open apps, each
+    with its icon."""
+    row, line = len(frame.out), "  "
     if state.get("hidden"):
         more = len(state["hidden"])
-        parts.append(f"{DIM}+{more} more order{'s' * (more > 1)}{RESET}")
-    apps = [(key, s) for key, s in state["live"].items() if is_app(s)]
+        line += f"{DIM}+{more} more order{'s' * (more > 1)}{RESET}   "
+    apps = sorted(
+        ((key, s) for key, s in state["live"].items() if is_app(s)), key=lambda app: app[1][2]
+    )
     if apps:
-        listed = "   ".join(
-            f"{DRINKS[s[0]][1]}{DRINKS[s[0]][0]}{RESET} {DIM}{s[3]:.0f}% · {fmt_mem(s[4])}{RESET}"
-            for _, s in sorted(apps, key=lambda app: app[1][2])
-        )
-        parts.append(f"{DIM}apps{RESET}  {listed}")
-    return "  " + "   ".join(parts) if parts else ""
+        line += f"{DIM}apps{RESET}"
+    for key, (kind, _, _, cpu, ram_mb) in apps:
+        line += "  "
+        if frame.gfx:
+            icon = ("icon", key[0], kind, state.get("png", True))
+            frame.pics[("icon", key)] = (icon, visible_len(line), row, 2)
+            line += "   "
+        name, color, _ = DRINKS[kind]
+        line += f"{color}{name}{RESET} {DIM}{cpu:.0f}% · {fmt_mem(ram_mb)}{RESET} "
+    frame.out.append(line.rstrip())
 
 
 def aim_cat(state, now, spots, lane_top):
@@ -1669,7 +1742,7 @@ def render(state, now, size=None):
     frame.out = [header(state, now, frame.width), news, ""]
     room = term_rows - 1 - TOP_ROWS - 1 - (LANE_ROWS if frame.gfx else 0)
     spots = render_cards(state, now, frame, room)
-    frame.out.append(footer(state, frame.width))
+    footer(state, frame)
     if frame.gfx:
         aim_cat(state, now, spots, len(frame.out))
         render_lane(state, now, frame, home=None if spots else frame.width - 8)
@@ -1887,19 +1960,27 @@ def check_power(state, caf):
     return start_caffeinate(saver)
 
 
+TINY_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII="
+)
+
+
 def kitty_graphics(fd):
-    """Ask the terminal whether it can show pictures (kitty graphics protocol).
-    The device-attributes query after it is answered by every terminal, so we
+    """Ask the terminal whether it can show pictures (kitty graphics protocol),
+    and whether it can decode PNGs, for app icons. Returns (pictures, png). The
+    device-attributes query after them is answered by every terminal, so we
     never wait longer than needed."""
     if os.environ.get("TMUX"):
-        return False
-    sys.stdout.write("\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033[c")
+        return False, False
+    sys.stdout.write(
+        f"\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033_Gi=32,a=q,f=100;{TINY_PNG}\033\\\033[c"
+    )
     sys.stdout.flush()
     reply, deadline = b"", time.time() + 1.0
     while time.time() < deadline and not re.search(rb"\033\[\?[\d;]*c", reply):
         if select.select([fd], [], [], 0.05)[0]:
             reply += os.read(fd, 1024)
-    return b"_Gi=31;OK" in reply
+    return b"_Gi=31;OK" in reply, b"_Gi=32;OK" in reply
 
 
 def draw(state, now, gallery, shown):
@@ -2013,7 +2094,7 @@ def main():
     sys.stdout.write("\033[22;2t\033[?1049h\033[?25l\033[?7l")
     try:
         tty.setcbreak(fd)
-        state["gfx"] = kitty_graphics(fd)
+        state["gfx"], state["png"] = kitty_graphics(fd)
         last_poll, last_power, shown = 0.0, 0.0, []
         while True:
             now = time.time()
