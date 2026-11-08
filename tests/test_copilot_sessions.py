@@ -105,27 +105,24 @@ class CopilotSessionTests(unittest.TestCase):
             connection.execute("DROP TABLE sessions")
         self.assertIsNone(caffe["scan_copilot_sessions"]())
 
-    def test_session_mugs_use_agent_label_in_app_color_in_every_layout(self):
+    def test_session_cards_use_agent_label_in_app_color_in_every_size(self):
         state = bar()
+        name, color, glaze = caffe["DRINKS"]["copilot"]
         for title in ("Fix widget", "Investigate ambiguous session labels"):
             self.insert(title=title)
             self.update(state)
-            for layout in (*caffe["LAYOUTS"], caffe["TEXT_LAYOUT"]):
-                with self.subTest(title=title, layout=layout[0]):
-                    pics, (label, where, status) = caffe["cup_cell"](
-                        state, KEY, 100, layout, (2, 0)
-                    )
-                    width = layout[1]
-                    self.assertEqual(label, f"{caffe['DRINKS']['copilot'][1]}Agent{caffe['RESET']}")
-                    self.assertNotIn(caffe["DIM"], label)
-                    self.assertLessEqual(caffe["visible_len"](label), width)
-                    self.assertLess(caffe["visible_len"](where), width)
-                    plain = where.removeprefix(caffe["DIM"]).removesuffix(caffe["RESET"])
+            for size, (card_w, _, k, n_lines) in caffe["CARDS"].items():
+                with self.subTest(title=title, size=size):
+                    width = card_w - (0 if k is None else 8) - 1
+                    lines = caffe["card_lines"](state, KEY, 100, width)[:n_lines]
+                    self.assertTrue(lines[0].startswith(f"{color}{caffe['BOLD']}Agent"))
+                    self.assertTrue(all(caffe["visible_len"](line) <= width for line in lines))
+                    plain = lines[0].split(caffe["DIM"])[1].removesuffix(caffe["RESET"])
                     self.assertTrue(plain == title or title.startswith(plain.removesuffix("…")))
-                    self.assertIn("brewing", status)
-                    self.assertEqual(pics["mug", KEY][0][4][0], "espresso")
-                    for sprite, *_ in pics.values():
-                        caffe["SPRITES"][sprite[0]](*sprite[1:])
+                    self.assertIn("brewing", lines[1])
+                    look = caffe["cup_look"](state, KEY, 100, k or 1.0)
+                    self.assertEqual(look[:3], ("cup", glaze, "brewing"))
+                    caffe["SPRITES"][look[0]](*look[1:])
             with sqlite3.connect(self.database) as connection:
                 connection.execute("DELETE FROM sessions")
 
@@ -176,21 +173,21 @@ class CopilotSessionTests(unittest.TestCase):
         }
         self.update(state, agents)
         self.assertEqual(set(state["live"]), {*agents, KEY})
-        frame = caffe["Frame"](96, True)
-        caffe["render_cups"](state, 105, list(state["live"]), frame, 30)
-        cat_layer = frame.pics["cat"][3]
-        for pid in state["live"]:
-            self.assertGreater(frame.pics["mug", pid][3], cat_layer)
-        lines, pics = caffe["render"](state, 105)
+        lines, pics = caffe["render"](state, 105, (96, 30))
+        self.assertGreater(pics["cat"][3], pics["cup", KEY][3])  # the cat walks over the table
+        drinks = {key[1]: pics[key][0][0] for key in pics if key[0] == "cup"}
+        self.assertEqual(
+            drinks, {1: "cup", KEY: "cup", (40, "copilot"): "latte", (50, "vscode"): "latte"}
+        )
         self.assertTrue(any("Agent" in line for line in lines))
-        self.assertIn(("mug", KEY), pics)
+        self.assertTrue(any("512M" in line for line in lines))
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             caffe["receipt"](state, 105)
         self.assertIn("Still brewing", output.getvalue())
         self.assertNotIn("Fix widget", output.getvalue())
         self.update(state)
-        self.assertEqual(state["orders"], {"Codex": 1})
+        self.assertEqual(state["orders"], {"Codex": 1})  # the apps' lattes are no orders
         self.assertIn((40, "copilot"), state["leaving"])
         self.assertNotIn(KEY, state["leaving"])
 
