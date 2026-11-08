@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import re
 import runpy
 import unittest
 from pathlib import Path
@@ -77,7 +78,7 @@ class CupStatusTests(unittest.TestCase):
         self.assertEqual(look(state, 1, 200), ("ready", 0))
         self.assertEqual(caffe["card_lines"](state, 1, 200, 22)[2], f"{GOLD}waiting for you{RESET}")
         self.assertIn("Order up! Claude", state["toast"][0])
-        self.assertEqual(state["visit"], 1)  # the cat goes to look
+        self.assertEqual(state["visit"], (1, "ready"))  # the cat goes and calls out for you
 
         cold = 125 + caffe["COLD_S"]
         poll(state, cold, {1: claude(0)})
@@ -110,11 +111,49 @@ class CupStatusTests(unittest.TestCase):
             poll(state, now, seen)
         self.assertEqual(caffe["card_order"](state, 160), [2, 1, 3])
 
-    def test_the_cat_checks_on_a_ready_order_and_eats_a_cold_ones_biscuit(self):
+    def test_the_cat_calls_out_a_ready_order_from_below_it(self):
+        state = bar()
+        state["live"] = {1: claude(0)}
+        state["visit"] = 1, "ready"
+        cat = state["cat"]
+        with patch("random.random", return_value=0.99):
+            for tick in range(300):
+                lines, pics = caffe["render"](state, tick * 0.12, (80, 24))
+                self.assertEqual(cat.y, 0)  # it never leaves its strip of table
+                if cat.mode == "meow":
+                    break
+        cup_left = pics["cup", 1][1]
+        self.assertTrue(cup_left <= cat.x <= cup_left + 6)  # right below the cup
+        self.assertEqual(pics["cat"][0][2], ("meow",))
+        called = tick * 0.12
+        lines, _ = caffe["render"](state, called + 1, (80, 24))
+        lane = next(i for i, line in enumerate(lines) if "╰" in line) - caffe["LANE_ROWS"]
+        self.assertIn("mrrp!", re.sub(r"\033\[[\d;]*m", "", lines[lane]))
+        for later in range(20, 40):  # it called for 2.4s, and sits for 3 to 5
+            caffe["render"](state, called + later * 0.12, (80, 24))
+        self.assertEqual(cat.mode, "sit")  # and then it waits with you
+        self.assertIsNone(cat.target)
+
+    def test_the_cat_looks_up_at_a_new_order_from_below_it(self):
+        state = bar()
+        state["live"] = {1: claude(0)}
+        state["visit"] = 1, "new"
+        cat = state["cat"]
+        with patch("random.random", return_value=0.99):
+            for tick in range(300):
+                _, pics = caffe["render"](state, tick * 0.12, (80, 24))
+                self.assertEqual(cat.y, 0)
+                if cat.mode == "look":
+                    break
+        cup_left = pics["cup", 1][1]
+        self.assertTrue(cup_left <= cat.x <= cup_left + 6)
+        self.assertEqual(pics["cat"][0][2][0], "look")
+
+    def test_the_cat_leaps_up_to_eat_a_cold_orders_biscuit(self):
         state = bar()
         state["live"] = {1: claude(0)}
         state["projects"] = {1: "caffe"}
-        state["visit"], state["biscuits"] = 1, {1}
+        state["visit"], state["biscuits"] = (1, "biscuit"), {1}
         cat = state["cat"]
         with patch("random.random", return_value=0.99):
             for tick in range(300):

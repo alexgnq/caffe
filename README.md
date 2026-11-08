@@ -35,6 +35,10 @@ after them.
   records what its sessions are doing, so these cards say exactly that:
   brewing while a run goes on, then ready, waiting for you, needing your
   approval, or with a failed run. A session quiet for an hour leaves the table.
+- **Codex CLI sessions, without guessing.** Codex records each turn, so a
+  Codex card brews while a turn runs and is ready the moment it ends, however
+  short it was. When Codex asks you something, its card says "has a question
+  for you", and so does the "Order up!" message. A turn you stop is idle.
 - **Lattes for open apps.** The Codex, Copilot, Claude, VS Code and T3 Code
   apps each get a latte, after the sessions: layered coffee in a tall glass on a
   coaster in the app's colour, with its CPU and RAM, counting everything the
@@ -46,10 +50,11 @@ after them.
   so you can keep an eye on your agents from another tab.
 - **A barista cat.** A random name and coat each launch. It lives on the strip
   of table below the cards: it walks about, grooms, yawns and naps when things
-  are quiet. It leaps up to sniff each new order and to check on ready ones,
-  and while an order is ready it sits up and looks at you instead of napping.
-  It knocks every finished cup off the table, and if you leave a ready order
-  until it goes cold, it eats the biscuit.
+  are quiet. When a new order comes in, it trots over and looks up at it. When
+  an order is ready, it sits below it, raises a paw and calls out `mrrp!`, then
+  waits with you instead of napping. It leaps up onto the cards to knock every
+  finished cup off the table, and if you leave a ready order until it goes
+  cold, to eat the biscuit.
 - **Pet the cat** with `p`. It purrs.
 - **Feed the cat** with `f`. It munches a fish treat, up to three every ten
   minutes before it's full.
@@ -121,7 +126,8 @@ including Copilot session tracking and app resource reporting.
   once, for the project name.
 - For terminal sessions, "ready" is a guess from CPU use: a session that worked
   for at least 15 seconds and then went quiet for 30. An agent waiting on a very
-  slow model reply can look ready early. T3 Code sessions need no guess.
+  slow model reply can look ready early. Codex CLI and T3 Code sessions need no
+  guess.
 - OpenCode runs its tools in a shared background server, so an OpenCode card
   only counts the work its terminal does.
 - Copilot's local, running, unarchived project, agent and general-chat sessions
@@ -132,6 +138,12 @@ including Copilot session tracking and app resource reporting.
 - While T3 Code is open, its open sessions and their latest runs and pending
   approvals are read the same way, from `~/.t3/userdata/statev2.sqlite`: titles
   and statuses only, never messages.
+- For each Codex CLI session, its folder picks its session in Codex's records
+  (`~/.codex/state_*.sqlite`, read-only), and the end of that session's log is
+  read for when turns start and end and whether Codex asked you something:
+  only the events' kinds and times, never what they say. If two Codex CLIs
+  share a folder, the newer one takes the most recently active session. If the
+  records can't be read, the card guesses from CPU as before.
 - `caffeinate` is tied to caffe's process ID, so the Mac can sleep again as soon
   as caffe exits, even if it's killed.
 - Every 30 seconds, `pmset -g batt` is read. On a low battery caffe restarts

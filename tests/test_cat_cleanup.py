@@ -60,7 +60,7 @@ class CatCleanupTests(unittest.TestCase):
             self.assertIsNone(cat.leap)
 
     def test_the_cat_climbs_to_a_finished_cup_and_knocks_it_off(self):
-        state = bar(leaving={1: ("codex", "ttys001", 0, -10)}, visit=1)
+        state = bar(leaving={1: ("codex", "ttys001", 0, -10)}, visit=(1, "knock"))
         climbed = False
         with patch("random.random", return_value=0.99):
             for tick in range(1, 201):
@@ -83,7 +83,7 @@ class CatCleanupTests(unittest.TestCase):
         state = bar(
             live={99: ("codex", "ttys099", 0, 0, 0)},
             leaving={pid: ("codex", "ttys001", 0, -pid) for pid in range(1, 6)},
-            visit=99,
+            visit=(99, "new"),
         )
         state["cat"].pet(0)
         finished = set(state["leaving"])
