@@ -1,3 +1,5 @@
+import io
+import os
 import runpy
 import unittest
 from pathlib import Path
@@ -78,6 +80,48 @@ class CatCleanupTests(unittest.TestCase):
                     break
         self.assertIn(app, state["knocked"])
         self.assertIn("knocked Codex's latte off", state["toast"][0])
+
+    def test_the_cat_only_leaps_between_the_table_and_the_cards(self):
+        state = bar(leaving={1: ("codex", "ttys001", 0, -10)})
+        cat, last, moves = state["cat"], None, []
+        with patch("random.random", return_value=0.99):
+            for tick in range(1, 400):
+                caffe["render"](state, tick * 0.12, (80, 24))
+                if last is not None and cat.y != last[1]:
+                    moves.append((cat.mode, last[2]))
+                last = (cat.x, cat.y, cat.mode)
+        self.assertIn(1, state["knocked"])
+        self.assertTrue(moves)
+        # Height only changes mid-leap, and every leap starts with a crouch.
+        self.assertEqual({mode for mode, _ in moves}, {"leap", "walk"})
+        self.assertTrue(all(before in ("crouch", "leap") for _, before in moves))
+        self.assertEqual(cat.y, 0)  # back down on its strip
+
+    def test_pictures_are_placed_between_cells_when_the_terminal_says_how_big_they_are(self):
+        gallery = caffe["Gallery"]()
+        self.assertEqual(gallery.cell_at(10.6, 3.4), (11, 3, 0, 0))  # the nearest cell
+        gallery.cell = (8, 16)
+        self.assertEqual(gallery.cell_at(10.5, 3.25), (10, 3, 4, 4))
+        self.assertEqual(gallery.cell_at(-2, 0.999), (0, 0, 0, 15))
+        with patch.dict(caffe["SPRITES"], cat=lambda *_: caffe["Img"](1, 1)):
+            out = gallery.sync({"cat": (("cat", 0), 10.5, 3.25, 3)})
+            self.assertIn("X=4,Y=4,", out)
+            self.assertIn("\033[4;11H", out)
+            self.assertNotIn("X=", gallery.sync({"cat": (("cat", 0), 12, 3, 3)}))
+
+    def test_the_cell_size_comes_from_the_terminal(self):
+        for reply, size in (
+            (b"\033[6;16;8t\033[?62;22c", (8, 16)),
+            (b"\033[6;0;0t\033[?62c", None),
+            (b"\033[?62c", None),
+        ):
+            read, write = os.pipe()
+            os.write(write, reply)
+            with patch("sys.stdout", io.StringIO()) as out:
+                self.assertEqual(caffe["cell_pixels"](read), size)
+            self.assertIn("\033[16t", out.getvalue())
+            os.close(read)
+            os.close(write)
 
     def test_graphics_cup_waits_for_swat_but_text_cup_expires(self):
         state = {"leaving": {1: ("codex", "ttys001", 0, -10)}, "knocked": {}, "gfx": True}

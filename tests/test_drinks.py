@@ -1,12 +1,6 @@
-import io
-import os
-import plistlib
-import re
 import runpy
-import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -169,89 +163,6 @@ class CardTests(unittest.TestCase):
         self.assertEqual(pics, {})
         self.assertTrue(lines[3].startswith(f"  {caffe['DRINKS']['claude'][1]}{BOLD}Claude"))
         self.assertIn("idle", lines[4])
-
-
-class AppIconTests(unittest.TestCase):
-    @staticmethod
-    def png(width):
-        return caffe["PNG_MAGIC"] + b"\0\0\0\rIHDR" + width.to_bytes(4, "big") * 2 + b"rest"
-
-    def icns(self, *widths):
-        entries = b"".join(
-            b"ic%02d" % i + (8 + len(self.png(w))).to_bytes(4, "big") + self.png(w)
-            for i, w in enumerate(widths)
-        )
-        entries += b"is32" + (12).to_bytes(4, "big") + b"\0" * 4  # an old, non-PNG entry
-        return b"icns" + (8 + len(entries)).to_bytes(4, "big") + entries
-
-    def test_the_smallest_big_enough_png_is_picked_from_an_icns(self):
-        icns_png = caffe["icns_png"]
-        self.assertEqual(icns_png(self.icns(1024, 32, 128, 64)), self.png(64))
-        self.assertEqual(icns_png(self.icns(16, 32)), self.png(32))  # nothing big enough
-        self.assertIsNone(icns_png(self.icns()))
-        self.assertIsNone(icns_png(b"not an icns file"))
-
-    def test_an_app_icon_comes_from_its_bundle(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bundle = Path(tmp, "Tool.app", "Contents")
-            (bundle / "Resources").mkdir(parents=True)
-            with open(bundle / "Info.plist", "wb") as info:
-                plistlib.dump({"CFBundleIconFile": "tool"}, info)
-            (bundle / "Resources" / "tool.icns").write_bytes(self.icns(128, 64))
-            exe = SimpleNamespace(stdout=f"{bundle}/MacOS/Tool\n")
-            with patch("subprocess.run", return_value=exe):
-                self.assertEqual(caffe["app_icon"](42), self.png(64))
-                icon = caffe["icon_sprite"](42, "codex")
-                self.assertEqual((icon.data, icon.cols, icon.rows), (self.png(64), 2, 1))
-            with patch("subprocess.run", return_value=SimpleNamespace(stdout="/bin/gone\n")):
-                self.assertIsNone(caffe["app_icon"](42))
-                tile = caffe["icon_sprite"](42, "codex")  # a tile in the app's colour
-                self.assertTrue(any(tile.buf[3::4]))
-            with patch("subprocess.run", return_value=exe) as run:
-                tile = caffe["icon_sprite"](42, "codex", False)  # the terminal can't show PNGs
-                self.assertFalse(isinstance(tile, caffe["Png"]))
-                run.assert_not_called()
-
-    def test_the_terminal_is_asked_about_pictures_and_pngs(self):
-        for reply, expected in (
-            (b"\033_Gi=31;OK\033\\\033_Gi=32;OK\033\\\033[?62;22c", (True, True)),
-            (b"\033_Gi=31;OK\033\\\033_Gi=32;EINVAL\033\\\033[?62c", (True, False)),
-            (b"\033[?1;2c", (False, False)),
-        ):
-            read, write = os.pipe()
-            os.write(write, reply)
-            with patch("sys.stdout", io.StringIO()) as out, patch.dict(os.environ, {"TMUX": ""}):
-                self.assertEqual(caffe["kitty_graphics"](read), expected)
-            self.assertIn("f=100;", out.getvalue())
-            os.close(read)
-            os.close(write)
-
-    def test_an_apps_icon_goes_before_its_name_with_graphics_only(self):
-        app = (40, "vscode")
-        for gfx in (True, False):
-            state = bar(live={app: ("vscode", "app:VS Code", 0, 4, 64)}, gfx=gfx)
-            lines, pics = caffe["render"](state, 5, (96, 24))
-            line = next(line for line in lines if "VS Code" in line)
-            plain = re.sub(r"\033\[[\d;]*m", "", line)
-            if gfx:
-                key, col, row, _ = pics["icon", app]
-                self.assertEqual(key, ("icon", 40, "vscode", True))
-                self.assertEqual(lines[row], line)
-                self.assertEqual(row, pics["cup", app][2])  # on the latte's first row
-                self.assertEqual(plain[col : col + 3], "   ")  # room for it
-                self.assertEqual(plain[col + 3 :].split()[:3], ["VS", "Code", "app"])
-            else:
-                self.assertNotIn(("icon", app), pics)
-                self.assertEqual(plain.split(), ["VS", "Code", "app"])
-
-    def test_png_pictures_are_sent_for_the_terminal_to_decode(self):
-        gallery = caffe["Gallery"]()
-        png = caffe["Png"](b"PNG", 2, 1)
-        with patch.dict(caffe["SPRITES"], icon=lambda *_: png):
-            out = []
-            self.assertEqual(gallery.image(("icon", 1, "codex"), out)[1:], (2, 1))
-        self.assertIn("f=100", out[0])
-        self.assertNotIn("o=z", out[0])
 
 
 if __name__ == "__main__":

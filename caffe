@@ -11,7 +11,7 @@ bar is quiet. Stray cats drop by now and then, and at 14:30 there's fika.
 
 On battery at 20% or less, the display may sleep; agents keep running.
 
-Each open app gets a latte, with its icon, CPU and RAM. Running local Copilot
+Each open app gets a latte, with its CPU and RAM. Running local Copilot
 app sessions and chats also get cards labelled "Agent"; idle ones are hidden.
 
 The pictures need a terminal with the kitty graphics protocol, such as Ghostty,
@@ -26,7 +26,6 @@ import base64
 import datetime
 import math
 import os
-import plistlib
 import random
 import re
 import select
@@ -71,7 +70,8 @@ LOW_BATTERY, BATTERY_POLL_S = 20, 30.0  # % at which the display may sleep
 MOUSE_ODDS, GUEST_ODDS = 1 / 100, 1 / 300  # per poll: a mouse every ~5 min, a guest every ~15
 CHASE_SPEED, ERRAND_SPEED, TREATS_PER_10_MIN = 15.0, 11.0, 3
 NIBBLE_ODDS, BUN_BITES = 1 / 120, 4  # per poll at fika: a bite every ~6 min, gone in four
-BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss")  # the cat finishes these first
+BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss", "crouch", "leap")  # finished first
+CROUCH_S = 0.25  # the cat gathers itself before it leaps
 
 QUIPS = [
     "Brewing tokens, one sip at a time.",
@@ -264,46 +264,6 @@ def project_name(path):
         return "~"
     name = os.path.basename(path.rstrip("/")) or path
     return re.sub(r"[\x00-\x1f\x7f]", "", name)
-
-
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
-
-def icns_png(data, want=64):
-    """The smallest PNG in an .icns file that is at least `want` pixels wide,
-    or the largest one if none is. None if it holds no PNGs."""
-    pngs, at = [], 8
-    while data[:4] == b"icns" and at + 8 <= len(data):
-        size = int.from_bytes(data[at + 4 : at + 8], "big")
-        body = data[at + 8 : at + size]
-        if size < 8:
-            break
-        if body[:8] == PNG_MAGIC and len(body) >= 24:
-            pngs.append((int.from_bytes(body[16:20], "big"), body))
-        at += size
-    big = sorted(png for png in pngs if png[0] >= want)
-    return (big[0] if big else max(pngs, default=(0, None)))[1]
-
-
-def app_icon(pid):
-    """The running app's own icon, as PNG, read from its bundle. None if it
-    can't be found."""
-    try:
-        exe = subprocess.run(
-            ["/bin/ps", "-o", "comm=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        ).stdout.strip()
-        bundle = Path(exe[: exe.index(".app/") + 4])
-        with open(bundle / "Contents" / "Info.plist", "rb") as info:
-            name = plistlib.load(info).get("CFBundleIconFile") or "AppIcon"
-        if not name.endswith(".icns"):
-            name += ".icns"
-        return icns_png((bundle / "Contents" / "Resources" / name).read_bytes())
-    except (OSError, ValueError, subprocess.SubprocessError, plistlib.InvalidFileException):
-        return None
 
 
 def agent_sessions(out, commands, now):
@@ -858,38 +818,114 @@ def cat_hiss():
 
 
 def cat_walk(step):
-    """Walking to the right, legs reaching out on both sides of its body."""
+    """Walking to the right, seen from the side and a little above: the legs on
+    its far side are a shade darker, behind its body."""
     cx, swing, tip = 25, (3, 1, -3, -1)[step], (0, 1, 2, 1)[step]
     return {
-        "tail": path(((cx - 13, 30), (cx - 19, 27), (cx - 21, 21 + tip), (cx - 18.5, 15)), 2.4),
+        "tail": path(((cx - 12, 28), (cx - 17, 24), (cx - 18.5, 17 + tip), (cx - 16, 11)), 2.4),
         "far": [
-            capsule(cx - 7, 27, cx - 7 - swing, 21.5, 2.1),
-            capsule(cx + 8, 27, cx + 8 + swing, 21.5, 2.1),
+            capsule(cx - 6, 32, cx - 6 - swing, 44.5, 2.1),
+            capsule(cx + 9, 32, cx + 9 + swing, 44.5, 2.1),
         ],
         "legs": [
-            capsule(cx - 8, 35, cx - 8 + swing, 41.5, 2.3),
-            capsule(cx + 8, 35, cx + 8 - swing, 41.5, 2.3),
+            capsule(cx - 9, 33, cx - 9 + swing, 45.5, 2.3),
+            capsule(cx + 7, 33, cx + 7 - swing, 45.5, 2.3),
         ],
-        "body": ellipse(cx, 31, 14.5, 8),
-        "head": ellipse(cx + 15.5, 27, 7.6, 7),
+        "body": capsule(cx - 10, 29.5, cx + 9, 28.5, 7.6),
+        "head": ellipse(cx + 15.5, 22.5, 7.6, 7),
         "ears": [
-            poly((cx + 9.5, 23), (cx + 10.6, 15), (cx + 15, 20.4)),
-            poly((cx + 16.4, 20), (cx + 21.4, 14), (cx + 22.6, 21.5)),
+            poly((cx + 9.6, 19), (cx + 10.6, 10.5), (cx + 15, 16)),
+            poly((cx + 16.4, 15.6), (cx + 21.4, 9.8), (cx + 22.6, 17.5)),
         ],
-        "inner": [poly((cx + 18, 20), (cx + 21, 16.2), (cx + 21.6, 20.6))],
-        "light": [ellipse(cx, 35, 8, 2.4), ellipse(cx + 20, 29.6, 3.2, 2.4)],
+        "inner": [poly((cx + 18, 15.8), (cx + 21, 12), (cx + 21.6, 16.4))],
+        "light": [ellipse(cx - 0.5, 34.8, 8, 2.2), ellipse(cx + 20, 25.2, 3.2, 2.4)],
         "paws": [
-            ellipse(cx - 8 + swing, 42, 2.6, 1.6),
-            ellipse(cx + 8 - swing, 42, 2.6, 1.6),
+            ellipse(cx - 9 + swing, 46, 2.6, 1.5),
+            ellipse(cx + 7 - swing, 46, 2.6, 1.5),
         ],
-        "nose": circle(cx + 22.8, 28.3, 0.95),
-        "eyes": [(cx + 18.2, 26)],
+        "nose": circle(cx + 22.8, 23.8, 0.95),
+        "eyes": [(cx + 18.2, 21.5)],
         "eye": 1.0,
         "stripes": [
-            *(capsule(x, 23.6, x + 0.5, 28.6, 0.95) for x in (cx - 7, cx - 2, cx + 3)),
-            capsule(cx + 15, 20.6, cx + 15.4, 23.4, 0.7),
+            *(capsule(x, 21.6, x + 0.5, 26.6, 0.95) for x in (cx - 7, cx - 2, cx + 3)),
+            capsule(cx + 15, 16.2, cx + 15.4, 19, 0.7),
         ],
-        "patches": [(ellipse(cx - 6, 29, 6, 5), CALICO_ORANGE), (ellipse(cx + 15, 23, 4, 3), None)],
+        "patches": [
+            (ellipse(cx - 6, 27, 6, 5), CALICO_ORANGE),
+            (ellipse(cx + 15, 18.5, 4, 3), None),
+        ],
+    }
+
+
+def cat_crouch():
+    """Low on its haunches, about to spring."""
+    cx, hy = 30, 22
+    pose = cat_sit()
+    pose.update(
+        tail=path(((cx + 9, 43), (cx + 14, 41.5), (cx + 16.5, 37), (cx + 15.5, 32)), 2.4),
+        body=ellipse(cx, 36.5, 12.5, 8.6),
+        head=ellipse(cx, hy, 10, 9.3),
+        ears=[
+            poly((cx - 9.5, hy - 2), (cx - 8.5, hy - 11.5), (cx - 2.5, hy - 8.5)),
+            poly((cx + 2.5, hy - 8.5), (cx + 8.5, hy - 11.5), (cx + 9.5, hy - 2)),
+        ],
+        inner=[
+            poly((cx - 8, hy - 4), (cx - 7.6, hy - 9.2), (cx - 4, hy - 8)),
+            poly((cx + 4, hy - 8), (cx + 7.6, hy - 9.2), (cx + 8, hy - 4)),
+        ],
+        light=[ellipse(cx, 39.5, 5.5, 4), ellipse(cx, hy + 5.2, 3.8, 2.7)],
+        paws=[ellipse(cx - 5, 44.6, 3, 1.8), ellipse(cx + 5, 44.6, 3, 1.8)],
+        nose=poly((cx - 1.4, hy + 3.4), (cx + 1.4, hy + 3.4), (cx, hy + 4.8)),
+        eyes=[(cx - 4, hy + 0.5), (cx + 4, hy + 0.5)],
+        closed=[],
+        stripes=[
+            capsule(cx, hy - 9.4, cx, hy - 6.2, 0.75),
+            capsule(cx - 2.8, hy - 8.8, cx - 2.3, hy - 5.9, 0.7),
+            capsule(cx + 2.8, hy - 8.8, cx + 2.3, hy - 5.9, 0.7),
+            *(capsule(cx + s * 12, y, cx + s * 8, y + 1, 0.8) for s in (-1, 1) for y in (34, 38)),
+        ],
+        patches=[
+            (ellipse(cx - 6, 35, 6, 4.5), CALICO_ORANGE),
+            (ellipse(cx + 5, hy - 4, 5, 4), None),
+            (ellipse(cx + 7, 39, 4.5, 3.5), CALICO_ORANGE),
+        ],
+    )
+    return pose
+
+
+def cat_leap(up=True):
+    """Mid-leap, seen from the side like its walk: stretched out, front paws
+    reaching ahead, hind legs pushing off. cat_sprite tilts it nose up, or nose
+    down when it hops back down."""
+    del up  # the tilt happens in cat_sprite
+    cx = 28
+    return {
+        "tail": path(((cx - 12, 25), (cx - 17, 21), (cx - 21, 19), (cx - 23.5, 15.5)), 2.3),
+        "far": [capsule(cx + 7, 28, cx + 18, 33, 2.1), capsule(cx - 8, 29, cx - 19, 36, 2.1)],
+        "legs": [capsule(cx + 6, 29, cx + 19, 30.5, 2.3), capsule(cx - 9, 30, cx - 21, 33, 2.3)],
+        "body": capsule(cx - 11, 26.5, cx + 9, 25, 7),
+        "head": ellipse(cx + 15.5, 19.5, 7.4, 6.8),
+        "ears": [
+            poly((cx + 9.8, 16), (cx + 10.4, 8), (cx + 14.8, 13)),
+            poly((cx + 16.2, 12.8), (cx + 21.2, 7), (cx + 22.4, 14.4)),
+        ],
+        "inner": [poly((cx + 17.8, 12.8), (cx + 20.8, 9.2), (cx + 21.4, 13.4))],
+        "light": [ellipse(cx - 1, 31.5, 8.5, 2), ellipse(cx + 20, 22.2, 3.2, 2.4)],
+        "paws": [
+            ellipse(cx + 20, 30.8, 2.6, 1.7),
+            ellipse(cx - 22.5, 33.4, 2.6, 1.7),
+        ],
+        "nose": circle(cx + 22.6, 20.8, 0.95),
+        "eyes": [(cx + 18, 18.6)],
+        "eye": 1.0,
+        "stripes": [
+            *(capsule(x, 19, x + 0.5, 23.6, 0.95) for x in (cx - 8, cx - 3, cx + 2)),
+            capsule(cx + 15, 13.2, cx + 15.4, 16, 0.7),
+        ],
+        "patches": [
+            (ellipse(cx - 6, 24, 6, 5), CALICO_ORANGE),
+            (ellipse(cx + 15, 15.5, 4, 3), None),
+        ],
     }
 
 
@@ -938,6 +974,8 @@ CAT_POSES = {
     "hiss": cat_hiss,
     "walk": cat_walk,
     "nap": cat_nap,
+    "crouch": cat_crouch,
+    "leap": cat_leap,
 }
 
 
@@ -945,6 +983,8 @@ def cat_sprite(coat, pose_key, flip, k):
     _, fur, dark, light, eye, pattern = COATS[coat]
     p = CAT_POSES[pose_key[0]](*pose_key[1:])
     img = Img(math.ceil(7 * k), math.ceil(3 * k), k)
+    if pose_key[0] == "leap":  # nose up to leap up the table, nose down to hop down
+        img.move(-0.32 if pose_key[1] else 0.32, (28, 26), (0, 0))
     dark_fur = sum(fur) < 300
     edge = (128, 128, 142) if dark_fur else mix(fur, INK, 0.55)
     outer = [p["tail"], p["body"], p["head"], *p["ears"], *p.get("legs", []), *p.get("far", [])]
@@ -1092,26 +1132,6 @@ def bun_sprite(kind, bites=0):
     return img
 
 
-class Png:
-    """A ready-made PNG picture, shown `cols` x `rows` cells big."""
-
-    def __init__(self, data, cols, rows):
-        self.data, self.cols, self.rows = data, cols, rows
-
-
-def icon_sprite(pid, kind, png=True):
-    """An open app's icon, 2 cols x 1 row: its own, if the terminal can show a
-    PNG, or a tile in its colour."""
-    data = app_icon(pid) if png else None
-    if data:
-        return Png(data, 2, 1)
-    img, glaze = Img(2, 1), DRINKS[kind][2]
-    img.fill(rbox(2, 2, 14, 14, 3.2), mix(glaze, INK, 0.3))
-    img.fill(rbox(2, 1.5, 14, 13, 3.2), glaze)
-    img.fill(rbox(4, 3.5, 12, 6, 1.2), mix(glaze, WHITE, 0.45), 0.8)
-    return img
-
-
 SPRITES = {
     "mouse": mouse_sprite,
     "treat": treat_sprite,
@@ -1121,7 +1141,6 @@ SPRITES = {
     "latte": latte_sprite,
     "knock": knock_sprite,
     "cat": cat_sprite,
-    "icon": icon_sprite,
 }
 
 
@@ -1131,21 +1150,18 @@ class Gallery:
 
     BASE_ID = 0xCAFE00
 
-    def __init__(self):
+    def __init__(self, cell=None):
         self.images, self.uploads, self.sent, self.objects, self.shown = {}, {}, set(), {}, {}
+        self.cell = cell  # a cell's (width, height) in pixels, to place pictures between cells
 
     def image(self, key, out):
         if key not in self.images:
             img = SPRITES[key[0]](*key[1:])
             iid = self.BASE_ID + len(self.images)
-            if isinstance(img, Png):  # the terminal decodes it
-                payload, fmt = img.data, "f=100"
-            else:
-                payload, fmt = zlib.compress(bytes(img.buf)), f"f=32,o=z,s={img.w},v={img.h}"
-            data = base64.standard_b64encode(payload).decode()
+            data = base64.standard_b64encode(zlib.compress(bytes(img.buf))).decode()
             chunks = [data[i : i + 4096] for i in range(0, len(data), 4096)] or [""]
             self.uploads[key] = "".join(
-                f"\033_G{f'a=t,q=2,{fmt},i={iid},' if n == 0 else ''}"
+                f"\033_G{f'a=t,q=2,f=32,o=z,i={iid},s={img.w},v={img.h},' if n == 0 else ''}"
                 f"m={int(n < len(chunks) - 1)};{chunk}\033\\"
                 for n, chunk in enumerate(chunks)
             )
@@ -1161,17 +1177,20 @@ class Gallery:
         return "\033_Ga=d,d=A,q=2\033\\"
 
     def sync(self, want):
-        """want: {object: (sprite key, col, row, z)}. Returns the escape codes."""
+        """want: {object: (sprite key, col, row, z)}. Returns the escape codes.
+        Positions may fall between cells."""
         out, shown = [], {}
         for obj, (key, col, row, z) in want.items():
             pid = self.objects.setdefault(obj, len(self.objects) + 1)
             iid, cols, rows = self.image(key, out)
-            spot = (iid, col, row, z)
+            c, r, x, y = self.cell_at(col, row)
+            spot = (iid, c, r, x, y, z)
             old = self.shown.get(pid)
             if old != spot:
+                nudge = f"X={x},Y={y}," if x or y else ""
                 out.append(
-                    f"\033[{row + 1};{max(0, col) + 1}H"
-                    f"\033_Ga=p,i={iid},p={pid},c={cols},r={rows},z={z},C=1,q=2\033\\"
+                    f"\033[{r + 1};{c + 1}H"
+                    f"\033_Ga=p,i={iid},p={pid},c={cols},r={rows},{nudge}z={z},C=1,q=2\033\\"
                 )
                 if old and old[0] != iid:
                     out.append(f"\033_Ga=d,d=i,i={old[0]},p={pid},q=2\033\\")
@@ -1180,6 +1199,15 @@ class Gallery:
             out.append(f"\033_Ga=d,d=i,i={self.shown[pid][0]},p={pid},q=2\033\\")
         self.shown = shown
         return "".join(out)
+
+    def cell_at(self, col, row):
+        """The cell a position starts in, and how many pixels into it. Without
+        the terminal's cell size, the nearest cell."""
+        col, row = max(0.0, col), max(0.0, row)
+        if not self.cell:
+            return round(col), round(row), 0, 0
+        (w, h), c, r = self.cell, math.floor(col), math.floor(row)
+        return c, r, min(w - 1, round((col - c) * w)), min(h - 1, round((row - r) * h))
 
 
 class Cat:
@@ -1197,6 +1225,7 @@ class Cat:
         self.name = random.choice(CAT_NAMES)
         self.x = self.goal = float(home)
         self.y = self.goal_y = 0.0
+        self.leap = None  # where from and to, while it leaps between table and cards
         self.dir, self.last, self.speed = 1, now, 7.0  # cols/s
         self.plan, self.mode, self.until = [], "nap", now + 4
         self.pets, self.petted_at, self.target = 0, 0.0, None
@@ -1287,8 +1316,12 @@ class Cat:
         if home is not None and (abs(self.goal - home) > 0.5 or self.goal_y):
             self.go(home)
         if self.mode == "walk":
-            if self._walk(dt, max_x):
+            if self._walk(dt, max_x, now):
                 self._arrive(now, calm, free_x, home, waiting=waiting)
+        elif self.mode == "crouch" and now >= self.until:
+            self.mode, self.leap["start"] = "leap", now
+        elif self.mode == "leap":
+            self._fly(now)
         elif now >= self.until:
             if self.plan:
                 self._next(now)
@@ -1300,27 +1333,47 @@ class Cat:
                 self.go(random.uniform(self.MIN_X, max_x))
         self.x = min(max(self.x, self.MIN_X), max_x)
 
-    def _walk(self, dt, max_x):
-        """A step towards its goal: along the table, and up or down a row at a
-        time. Returns whether it got there."""
+    def _walk(self, dt, max_x, now):
+        """A step towards its goal along the table. To get up to a card, it
+        walks until it's below it, then crouches to leap. Returns whether it
+        got there."""
         goal = min(max(self.goal, self.MIN_X), max_x)
         speed = CHASE_SPEED if self.chasing else self.speed
         if self.target is not None:  # off to see to a cup: it trots
             speed = max(speed, ERRAND_SPEED)
-        climb = speed / 2 * dt  # rows are twice as tall as columns are wide
-        if abs(goal - self.x) <= speed * dt and abs(self.goal_y - self.y) <= climb:
-            self.x, self.y = goal, self.goal_y
-            return True
-        if abs(goal - self.x) > speed * dt:
-            self.dir = 1 if goal > self.x else -1
-            self.x += self.dir * speed * dt
-        else:
+        if self.goal_y != self.y:
+            if not self.y and abs(goal - self.x) > speed * dt:
+                self._stride(goal, speed * dt)
+                return False
+            # Up: from right below the card. Down: straight down, then walk.
+            to_x = goal if self.goal_y else self.x
+            self.leap = {
+                "from": (self.x, self.y),
+                "to": (to_x, self.goal_y),
+                "time": 0.35 + 0.025 * abs(self.goal_y - self.y),
+                "up": self.goal_y < self.y,
+            }
+            self.mode, self.until = "crouch", now + CROUCH_S
+            return False
+        if abs(goal - self.x) <= speed * dt:
             self.x = goal
-        if abs(self.goal_y - self.y) > climb:
-            self.y += climb if self.goal_y > self.y else -climb
-        else:
-            self.y = self.goal_y
+            return True
+        self._stride(goal, speed * dt)
         return False
+
+    def _stride(self, goal, step):
+        self.dir = 1 if goal > self.x else -1
+        self.x += self.dir * step
+
+    def _fly(self, now):
+        """Along its leap, easing off and landing softly, then on its way."""
+        leap = self.leap
+        t = min(1.0, (now - leap["start"]) / leap["time"])
+        ease = t * t * (3 - 2 * t)
+        (x0, y0), (x1, y1) = leap["from"], leap["to"]
+        self.x, self.y = x0 + (x1 - x0) * ease, y0 + (y1 - y0) * ease
+        if t >= 1:
+            self.mode, self.leap = "walk", None
 
     def pose(self, now):
         """The sprite pose for this moment, and whether to mirror it."""
@@ -1328,6 +1381,8 @@ class Cat:
         chew = (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False)
         poses = {
             "walk": (("walk", int(now * 8) % 4), mirrored),
+            "crouch": (("crouch",), False),
+            "leap": (("leap", bool(self.leap and self.leap["up"])), mirrored),
             "nap": (("nap", int(now / 1.2) % 2), mirrored),
             "groom": (("groom", 1 + int(now * 3) % 2), False),
             "yawn": (("yawn",), False),
@@ -1346,8 +1401,7 @@ class Cat:
         """Put the cat's picture in `frame`, and its zZ in the strip's text `art` rows."""
         pose, flip = self.pose(now)
         cols, rows, cat_rows = math.ceil(7 * k), len(art), math.ceil(3 * k)
-        left, up = round(self.x) - cols // 2, round(self.y)
-        row = top + rows - cat_rows + up
+        left, row = self.x - cols // 2, top + rows - cat_rows + self.y
         frame.pics[self.key] = (("cat", self.coat, pose, flip, k), left, row, 3)
         if self.mode == "purr":
             beat = int((now - self.petted_at) / 0.1) % HEART_FRAMES
@@ -1355,10 +1409,10 @@ class Cat:
         if self.mode == "eat":
             bites = min(3, int((now - self.fed[-1]) / 0.6))
             frame.pics[(self.key, "treat")] = (("treat", bites, k), left, row + cat_rows - 1, 3)
-        if pose[0] == "nap" and not up:
+        if pose[0] == "nap" and not self.y:
             for i, ch in enumerate("zZ"):
                 r = rows - cat_rows - (int(now * 1.5) + i) % 2
-                col = left + (cols - 2 if not flip else 1) + i
+                col = round(left) + (cols - 2 if not flip else 1) + i
                 if 0 <= r < rows and 0 <= col < len(art[r]):
                     art[r][col] = f"{DIM}{ch}{RESET}"
 
@@ -1441,9 +1495,8 @@ def cup_look(state, pid, now, k):
     return ("cup", glaze, word, stir if word == "brewing" else 0, k)
 
 
-def card_lines(state, pid, now, width, icon=False):
-    """A card's three lines: name and project, status, and a note. An app's
-    card leaves room for its `icon` before its name."""
+def card_lines(state, pid, now, width):
+    """A card's three lines: name and project, status, and a note."""
     leaving = pid in state["leaving"]
     cup = state["leaving"][pid] if leaving else state["live"][pid]
     kind, source = cup[:2]
@@ -1456,10 +1509,8 @@ def card_lines(state, pid, now, width, icon=False):
         where = "app"
     else:
         where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
-    gap = "   " if app and icon else ""
-    width -= len(gap)
     name = trim(name, width)
-    title = f"{gap}{color}{BOLD}{name}{RESET}"
+    title = f"{color}{BOLD}{name}{RESET}"
     if width - len(name) > 2:
         title += f" {DIM}{trim(where, width - len(name) - 1)}{RESET}"
     if leaving:
@@ -1516,7 +1567,7 @@ def cat_visit(state, now):
     """When the cat reaches a finished cup, it swats it off the table. At a
     ready order that went cold, it helps itself to the biscuit."""
     cat = state["cat"]
-    if cat.target is None or cat.mode == "walk":
+    if cat.target is None or cat.mode in ("walk", "crouch", "leap"):  # not there yet
         return
     pid = cat.target
     if pid in state["leaving"] and pid not in state["knocked"]:
@@ -1617,7 +1668,7 @@ def run_mouse(state, now, frame, spot, lane_ends):
     else:
         if cat.chasing:
             cat.goal, cat.goal_y, cat.mode, cat.plan = mouse["x"], 0.0, "walk", []
-        left = round(mouse["x"]) - math.ceil(3 * k) // 2
+        left = mouse["x"] - math.ceil(3 * k) / 2
         frame.pics["mouse"] = (("mouse", int(now * 10) % 2, mouse["dir"] < 0, k), left, row, 1)
 
 
@@ -1683,11 +1734,7 @@ def render_cards(state, now, frame, room_rows):
             look = cup_look(state, pid, now, k)
             left = x - round(4 * k) if look[0] == "knock" else x
             frame.pics[("cup", pid)] = (look, left, top + y, 2)
-            cup = state["leaving"].get(pid) or state["live"][pid]
-            if is_app(cup):  # the app's own icon, before its name
-                icon = ("icon", pid[0], cup[0], state.get("png", True))
-                frame.pics[("icon", pid)] = (icon, x + text_at, top + y, 2)
-        lines = card_lines(state, pid, now, card_w - text_at - 1, icon=frame.gfx)
+        lines = card_lines(state, pid, now, card_w - text_at - 1)
         for j, line in enumerate(lines[:n_lines]):
             rows[y + j].append((x + text_at, line))
     frame.out += [runs(cells).rstrip() for cells in rows]
@@ -1721,8 +1768,13 @@ def aim_cat(state, now, spots, lane_top):
     cat = state["cat"]
     # When the cards reflow, the strip moves. A cat on it moves along; one up
     # among the cards stays where it is on screen, though never above them.
-    if cat.y:
-        cat.y -= lane_top - state.get("lane_top", lane_top)
+    moved = lane_top - state.get("lane_top", lane_top)
+    if cat.leap:  # mid-leap: shift the ends of it that are up among the cards
+        for end in ("from", "to"):
+            x, y = cat.leap[end]
+            cat.leap[end] = (x, y - moved if y else y)
+    elif cat.y:
+        cat.y -= moved
         cat.y = min(0.0, max(cat.y, float(TOP_ROWS - lane_top)))
     state["lane_top"] = lane_top
     visit = state.pop("visit", None)
@@ -2032,27 +2084,30 @@ def check_power(state, caf):
     return start_caffeinate(saver)
 
 
-TINY_PNG = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII="
-)
-
-
-def kitty_graphics(fd):
-    """Ask the terminal whether it can show pictures (kitty graphics protocol),
-    and whether it can decode PNGs, for app icons. Returns (pictures, png). The
-    device-attributes query after them is answered by every terminal, so we
-    never wait longer than needed."""
-    if os.environ.get("TMUX"):
-        return False, False
-    sys.stdout.write(
-        f"\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\\033_Gi=32,a=q,f=100;{TINY_PNG}\033\\\033[c"
-    )
+def ask_terminal(fd, query):
+    """Send `query` and return the terminal's reply. The device-attributes query
+    after it is answered by every terminal, so we never wait longer than needed."""
+    sys.stdout.write(query + "\033[c")
     sys.stdout.flush()
     reply, deadline = b"", time.time() + 1.0
     while time.time() < deadline and not re.search(rb"\033\[\?[\d;]*c", reply):
         if select.select([fd], [], [], 0.05)[0]:
             reply += os.read(fd, 1024)
-    return b"_Gi=31;OK" in reply, b"_Gi=32;OK" in reply
+    return reply
+
+
+def kitty_graphics(fd):
+    """Ask the terminal whether it can show pictures (kitty graphics protocol)."""
+    if os.environ.get("TMUX"):
+        return False
+    return b"_Gi=31;OK" in ask_terminal(fd, "\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\")
+
+
+def cell_pixels(fd):
+    """A cell's (width, height) in pixels, so pictures can move smoothly
+    between cells. None if the terminal doesn't say."""
+    size = re.search(rb"\033\[6;(\d+);(\d+)t", ask_terminal(fd, "\033[16t"))
+    return (int(size[2]), int(size[1])) if size and int(size[1]) and int(size[2]) else None
 
 
 def draw(state, now, gallery, shown):
@@ -2166,7 +2221,8 @@ def main():
     sys.stdout.write("\033[22;2t\033[?1049h\033[?25l\033[?7l")
     try:
         tty.setcbreak(fd)
-        state["gfx"], state["png"] = kitty_graphics(fd)
+        state["gfx"] = kitty_graphics(fd)
+        gallery.cell = cell_pixels(fd) if state["gfx"] else None
         last_poll, last_power, shown = 0.0, 0.0, []
         while True:
             now = time.time()
@@ -2178,6 +2234,8 @@ def main():
             if resized[0]:
                 resized[0], shown = False, []
                 sys.stdout.write((gallery.reset() if state["gfx"] else "") + "\033[2J")
+                if state["gfx"]:  # a new font size changes the cells, too
+                    gallery.cell = cell_pixels(fd)
             shown = draw(state, now, gallery, shown)
             r, _, _ = select.select([sys.stdin], [], [], frame_delay(state))
             if r and on_key(state, sys.stdin.read(1).lower()):

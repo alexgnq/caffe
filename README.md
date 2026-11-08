@@ -32,8 +32,7 @@ after them.
   running; idle sessions disappear without being served.
 - **Lattes for open apps.** The Codex, Copilot, Claude and VS Code apps each
   get a latte, after the sessions: a tall glass on a coaster in the app's
-  colour, with the app's own icon and its CPU and RAM, counting everything the
-  app runs. The foam swirls while the app is busy. Opening an app pours its
+  colour, with its CPU and RAM, counting everything the app runs. The foam swirls while the app is busy. Opening an app pours its
   latte in; closing it settles its tab, and the cat knocks the empty glass off
   the table. Apps don't count as orders.
 - **At a glance.** The header and the terminal tab's title count what's ready,
