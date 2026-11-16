@@ -58,6 +58,10 @@ after them.
 - **Pet the cat** with `p`. It purrs.
 - **Feed the cat** with `f`. It munches a fish treat, up to three every ten
   minutes before it's full.
+- **Capybara mode.** Run `caffe --capybara` for a capybara riding a turtle
+  instead of the resident cat. The pair moves at half the cat's speed, even
+  during rush hour, and `f` feeds it lettuce instead of fish. Pets and the
+  three-treats-per-ten-minutes limit stay the same; visiting cats are still cats.
 - **Mice.** Now and then a mouse dashes across the table and the cat gives
   chase. A slow mouse gets caught (and let go); a fast one escapes. A napping
   cat sleeps right through it. Mice come out more at night.
@@ -103,6 +107,15 @@ caffe
 
 Press `p` to pet the cat, `f` to feed it, and `q` or `Ctrl-C` to close the bar.
 `caffe --help` prints a short summary.
+
+For a slower barista, riding a turtle:
+
+```sh
+caffe --capybara
+```
+
+Press `p` to pet the capybara or `f` to feed it lettuce. Without the flag, the
+usual cat and fish treats are unchanged.
 
 To update to the latest version:
 
