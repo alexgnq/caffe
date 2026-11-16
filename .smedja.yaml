@@ -1,0 +1,33 @@
+# Smedja's one file in this repo (RFC-008). The policy (procedures, controls,
+# approvers, models) is stored outside the repo; this file pins the version
+# this repo runs under. Change policies in smedja web, then move the pin here.
+apiVersion: smedja/v1
+kind: Repo
+spec:
+  policy: {name: default, version: 'sha256:bf69bdd10b678ba25f3d25926339cd190366bdb9a26f18d55738a1eaeb129dcb'}
+  checks:
+    # from .github/workflows/ci.yml: compile
+    build:
+      command: '{ /usr/bin/python3 -m py_compile caffe; } > "$SMEDJA_EVIDENCE_DIR/build.log" 2>&1'
+      evidence: build.log
+      timeout: 10m
+    # from smedja: the rules of the repo's ADRs
+    constraints:
+      command: '"$SMEDJA_EXECUTABLE" check constraints'
+      evidence: constraints.json
+      timeout: 1m
+    # from .github/workflows/ci.yml: shellcheck + ruff
+    lint:
+      command: |-
+        { shellcheck -s sh install.sh && (
+        set -e
+        pipx run ruff==0.17.3 check .
+        pipx run ruff==0.17.3 format --check .
+        ); } > "$SMEDJA_EVIDENCE_DIR/lint.log" 2>&1
+      evidence: lint.log
+      timeout: 10m
+    # from .github/workflows/ci.yml: tests
+    test:
+      command: '{ /usr/bin/python3 -m unittest discover -s tests; } > "$SMEDJA_EVIDENCE_DIR/test.log" 2>&1 && for t in $SMEDJA_PLANNED_TESTS; do grep -Fq -- "$t" "$SMEDJA_EVIDENCE_DIR/test.log" || echo "note: planned test $t is not named in this output, so smedja cannot tell that it ran" >> "$SMEDJA_EVIDENCE_DIR/test.log"; done'
+      evidence: test.log
+      timeout: 10m
