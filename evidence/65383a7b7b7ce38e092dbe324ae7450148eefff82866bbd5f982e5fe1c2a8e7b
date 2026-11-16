@@ -1,0 +1,15 @@
+...........................................................................................................
+----------------------------------------------------------------------
+Ran 107 tests in 8.095s
+
+OK
+note: planned test test_capybara_mode.CapybaraModeTests.test_cli_modes_help_and_invalid_arguments is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_startup_uses_selected_mode is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_default_cat_and_visitors_stay_cats is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_capybara_moves_at_half_speed_in_all_contexts is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_capybara_leaps_slower_and_lands_on_target is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_all_capybara_poses_include_rider_and_turtle is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_feeding_selects_lettuce_and_preserves_limits is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_lettuce_disappears_progressively_with_bites is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_capybara_completes_cup_cleanup is not named in this output, so smedja cannot tell that it ran
+note: planned test test_capybara_mode.CapybaraModeTests.test_rendering_fits_and_text_only_has_no_pictures is not named in this output, so smedja cannot tell that it ran

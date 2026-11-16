@@ -1,0 +1,1 @@
+{"apiVersion":"smedja/v1","changed_files":["caffe","README.md","tests/test_capybara_mode.py"],"cost":{"spend":0},"kind":"ResultEnvelope","status":"done","summary":"Added capybara mode with a turtle ride, half-speed movement, lettuce feeding, documentation, and regression tests"}
