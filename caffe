@@ -21,8 +21,11 @@ kitty, WezTerm or a recent iTerm2. Other terminals get the cards without picture
 Press p to pet the cat, f to feed it a treat, and q (or Ctrl-C) to close the bar
 and get your receipt.
 
-Run `caffe --capybara` for a capybara riding a turtle: it moves at half the
-cat's speed, and f feeds it lettuce instead of fish.
+Press c to swap the cat for a capybara riding a turtle, and back. It does the
+cat's job at a turtle's pace, eats apples, gives mice a ride instead of chasing
+them, serves apps boba tea in their colour
+instead of lattes, and its visitors are capybaras too. `caffe --capybara`
+starts with it.
 
 `caffe update` installs upstream over this copy, replacing local customizations.
 """
@@ -92,6 +95,7 @@ CHASE_SPEED, ERRAND_SPEED, TREATS_PER_10_MIN = 15.0, 11.0, 3
 NIBBLE_ODDS, BUN_BITES = 1 / 120, 4  # per poll at fika: a bite every ~6 min, gone in four
 BUSY_MODES = ("purr", "slap", "eat", "nibble", "hiss", "meow", "crouch", "leap")  # finished first
 CROUCH_S = 0.25  # the cat gathers itself before it leaps
+TURTLE_PACE = 0.5  # a capybara's turtle walks this much slower than a cat, in shorter steps
 MEOW_S = 2.4  # how long the cat calls out a ready order
 
 QUIPS = [
@@ -948,6 +952,92 @@ def draw_latte(img, glaze, look, frame):
             img.fill(capsule(cx, top - 2, cx, top + 2, 0.4), FOAM)
 
 
+BOBA_MILK = (247, 236, 218)
+PEARL, PEARL_SHINE = (44, 29, 25), (128, 100, 86)
+PEARLS = (  # tapioca at the foot of the glass, the last ones sit in the bottom
+    (-4.2, 40.6), (0.3, 41.2), (4.6, 40.5), (-7.2, 38.6), (-2.2, 38.2), (2.3, 38.4),
+    (6.8, 38.3), (-5.2, 35.8), (-0.2, 35.6), (4.6, 35.9), (-7.6, 33.6), (7.4, 33.4),
+)  # fmt: skip
+
+
+def boba_sprite(glaze, look, frame=0, k=1.0):
+    """Milk tea in the app's colour over tapioca pearls, in a glass with a wide straw."""
+    img = Img(math.ceil(6 * k), math.ceil(3 * k), k)
+    draw_boba(img, glaze, look, frame)
+    return img
+
+
+def draw_boba(img, glaze, look, frame):
+    cx, top, bottom = CUP_X, GLASS_TOP, GLASS_BOTTOM
+    img.fill(ellipse(cx + 1, 45, 14, 2.6), INK, 0.28)
+    glass = union(
+        poly((cx - 11, top), (cx + 11, top), (cx + 9.5, bottom - 2), (cx - 9.5, bottom - 2)),
+        ellipse(cx, bottom - 2, 9.5, 3),
+    )
+    img.fill(grow(glass, 0.5), (221, 228, 222), 0.4)
+    img.fill(glass, (190, 206, 207), 0.16)
+    full = {
+        "pour": (frame + 1) / POUR_FRAMES,
+        "drain": (0.65, 0.25, 0)[min(frame, 2)],
+        "empty": 0,
+    }.get(look, 1)
+    surface = bottom - (bottom - top) * full
+
+    def tea(_x, y):
+        # Like Thai tea: the milk floats on top and the colour deepens below.
+        return mix(BOBA_MILK, glaze, 0.42 + 0.5 * ((y - top) / (bottom - top)) ** 0.8)
+
+    if full:
+        img.fill(clip(glass, rbox(0, surface, 48, 48, 0)), tea)
+        img.fill(clip(glass, ellipse(cx, surface, 10.4, 3.1)), mix(BOBA_MILK, glaze, 0.22))
+    phase = frame / STIR_FRAMES * 2 * math.pi
+    for i, (x, rest) in enumerate(PEARLS if full else PEARLS[:3]):
+        y = rest + (math.sin(phase + i * 1.7) * 0.7 if look == "busy" else 0)
+        img.fill(clip(circle(cx + x, y, 1.75), glass), PEARL)
+        img.fill(circle(cx + x - 0.5, y - 0.6, 0.45), PEARL_SHINE, 0.8)
+    # Reflections follow the sides; the tea remains visible through the glass.
+    img.fill(capsule(cx - 8, top + 6, cx - 7, bottom - 3, 0.65), WHITE, 0.7)
+    img.fill(capsule(cx + 9, top + 5, cx + 8.3, bottom - 4, 0.35), WHITE, 0.4)
+    img.fill(ellipse(cx, top, 11, 3.8), (224, 232, 225), 0.65)
+    img.fill(ellipse(cx, top, 9.7, 2.9), tea(cx, top) if full == 1 else (65, 69, 66))
+    if full == 1 and look not in ("pour", "drain"):
+        for x, turn in ((-4, 0.35), (3, -0.3)):  # ice
+            img.move(turn, (cx + x, top), (0, 0))
+            img.fill(rbox(cx + x - 2.2, top - 1.3, cx + x + 2.2, top + 1.3, 0.6), WHITE, 0.55)
+            img.moved = None
+        if look == "busy":
+            swirl(img, (cx, top), frame, 8, mix(BOBA_MILK, glaze, 0.8))
+    drop = (POUR_FRAMES - 1 - frame) * 8 if look == "pour" else 0  # the straw goes in last
+    (ax, ay), (bx, by) = (cx + 2, bottom - 5 - drop), (cx + 7, 1.5 - drop)
+    straw = capsule(ax, ay, bx, by, 1.6)
+    color = mix(glaze, WHITE, 0.55)
+    if drop < 32:
+        img.fill(clip(straw, rbox(0, 0, 48, max(top, surface), 0)), color)
+        img.fill(clip(straw, rbox(0, max(top, surface), 48, 48, 0)), color, 0.45)
+    if look == "busy":  # pearls ride up the straw, seen through it
+        for t in ((frame / STIR_FRAMES + j / 2) % 1 for j in (0, 1)):
+            x, y = ax + (bx - ax) * t, ay + (by - ay) * t
+            img.fill(clip(circle(x, y, 1.2), straw), PEARL, 0.9)
+    if look == "pour":
+        strength = min(1, (1 - full) * 5)
+        stream = mix(BOBA_MILK, glaze, 0.85)
+        fall = [
+            (cx - 4 + math.sin(y * 0.45 + frame * 1.3) * 0.5 * y / surface, y)
+            for y in (surface * i / 10 for i in range(11))
+        ]
+        for (x0, y0), (x1, y1) in zip(fall, fall[1:]):
+            width = 1.1 - 0.5 * y1 / surface
+            img.fill(
+                clip(capsule(x0, y0, x1, y1, width), rbox(0, 0, 48, surface, 0)), stream, strength
+            )
+        img.fill(clip(glass, ellipse(cx - 4, surface, 3.2, 0.9)), BOBA_MILK, strength * 0.8)
+        for dx in (-2.6, 2.4):
+            img.fill(circle(cx - 4 + dx, surface - 1.6 - frame % 2, 0.45), stream, strength * 0.8)
+
+
+DRINK_NAMES = {"boba": "boba tea"}
+
+
 def knock_sprite(glaze, frame, k=1.0, drink="cup"):
     """A drink the cat pushed: it tips over to the left and drops off the table.
     The picture is 4 cols wider than a drink, which starts at its right."""
@@ -957,7 +1047,9 @@ def knock_sprite(glaze, frame, k=1.0, drink="cup"):
     tip = min(1.0, t / 0.45)
     img.move(-1.5 * tip, (CUP_X - 10, 44), (32 - 14 * tip, 26 * fall * fall))
     img.fade = 1 - fall
-    (draw_latte if drink == "latte" else draw_cup)(img, glaze, "empty", 0)
+    (draw_latte if drink == "latte" else draw_boba if drink == "boba" else draw_cup)(
+        img, glaze, "empty", 0
+    )
     return img
 
 
@@ -1198,87 +1290,188 @@ def cat_markings(img, p, pattern, dark, silhouette):
         img.fill(clip(grow(union(*p["light"][-1:]), 2.5), p["head"]), dark, 0.7)
 
 
-def turtle(img, step):
-    """The capybara's ride, always visible below its rider."""
-    green, shell, edge = (147, 174, 100), (77, 119, 72), (47, 74, 49)
-    swing = 1.6 * math.sin(step * math.pi / 4)
-    img.fill(ellipse(28, 45, 22, 1.5), INK, 0.22)
-    img.fill(poly((11, 38), (3, 40), (12, 42)), green)
-    for x, offset in ((14, swing), (35, -swing)):
-        foot = capsule(x, 39, x + offset, 44, 2.2)
-        img.fill(grow(foot, 0.6), edge)
-        img.fill(foot, green)
-    img.fill(capsule(39, 39, 47, 39, 3), green)
-    img.fill(ellipse(48, 38.5, 5.3, 4), green)
-    img.fill(circle(50, 37.5, 0.7), INK)
-    img.fill(capsule(50, 40, 52, 39.5, 0.35), edge)
-    dome = ellipse(26, 37.5, 17.5, 7)
-    img.fill(grow(dome, 0.8), edge)
-    img.fill(dome, shell)
-    img.fill(clip(ellipse(23, 35, 14, 5.5), dome), (96, 142, 80))
-    seams = [
-        path(((16, 32), (20, 36), (18, 41)), 0.55),
-        path(((31, 31), (34, 36), (31, 42)), 0.55),
-        path(((20, 36), (27, 34), (34, 36)), 0.55),
-        path(((18, 41), (26, 43), (31, 42)), 0.55),
-        capsule(27, 34, 26, 43, 0.55),
-    ]
-    for seam in seams:
-        img.fill(clip(seam, dome), edge, 0.7)
-    img.fill(clip(capsule(10, 41, 42, 42, 0.7), dome), green)
+# ---- The barista as a capybara instead: it sits up on a turtle, seen from the
+# side and facing right, and the turtle does the walking. It takes the cat's
+# poses, plus ("eat", bites, chew) for the apple it holds when fed. Its coat
+# picks the turtle's shell, so a visitor's differs from the barista's.
+SHELLS = [
+    (204, 98, 84),
+    (86, 140, 204),
+    (150, 116, 190),
+    (222, 164, 70),
+    (70, 150, 150),
+    (216, 124, 156),
+]
+CAPY_FUR, CAPY_DARK = (198, 134, 84), (132, 88, 62)
+TURTLE, TURTLE_EDGE, TURTLE_BELLY = (158, 196, 104), (78, 112, 62), (240, 196, 98)
+APPLE = (216, 54, 52)
 
 
-def capybara_sprite(pose_key, flip, k):
-    """A round-eared, blunt-nosed capybara sitting on a little green turtle.
-    Uses the controller's cat poses, but the turtle does the walking."""
+def outlined(img, shape, color, edge, width=0.7):
+    img.fill(grow(shape, width), edge)
+    img.fill(shape, color)
+
+
+def draw_turtle(img, shell, stride, asleep):
+    """The capybara's ride. `stride`, from -1 to 1, swings its legs."""
+    swing, dark = 3 * stride, mix(shell, INK, 0.45)
+    img.fill(ellipse(28, 45.8, 23, 1.7), INK, 0.22)
+    outlined(img, poly((9, 39), (3, 41.5), (9, 42.5)), TURTLE, TURTLE_EDGE)
+    for x, way in ((17, 1), (33, -1)):  # the far legs step the other way
+        img.fill(capsule(x, 41, x + way * swing, 45, 2.3), mix(TURTLE, INK, 0.35))
+    hy = 35.5 if asleep else 33.5 - 0.5 * stride
+    outlined(img, capsule(38, 39, 47, hy + 1.5, 2.6), TURTLE, TURTLE_EDGE)
+    outlined(img, ellipse(25, 41.5, 14, 2.6), TURTLE_BELLY, TURTLE_EDGE)
+    for x, way in ((13, -1), (37, 1)):
+        outlined(img, capsule(x, 41, x + way * swing, 45, 2.5), TURTLE, TURTLE_EDGE)
+    dome = clip(ellipse(25, 40, 16, 9), rbox(0, 0, 56, 40, 0))
+    outlined(img, dome, shell, dark)
+    img.fill(clip(ellipse(22, 34.5, 9, 2.2), dome), WHITE, 0.16)
+    for seam in (
+        path(((15, 40), (18, 35), (32, 35), (35, 40)), 0.45),
+        capsule(18, 35, 16, 32.5, 0.45),
+        capsule(32, 35, 34, 32.5, 0.45),
+        capsule(25, 35, 25, 31, 0.45),
+    ):
+        img.fill(clip(seam, dome), dark, 0.75)
+    outlined(img, capsule(9.5, 40, 40.5, 40, 1.3), mix(shell, INK, 0.18), dark, 0.6)
+    outlined(img, ellipse(48.5, hy, 5, 4.4), TURTLE, TURTLE_EDGE)
+    img.fill(ellipse(49, hy + 1.6, 1.4, 0.8), PINK, 0.7)
+    if asleep:
+        img.fill(capsule(49.5, hy - 0.8, 51.5, hy - 0.8, 0.4), INK)
+    else:
+        img.fill(circle(50.5, hy - 1, 1), INK)
+        img.fill(circle(50.2, hy - 1.4, 0.35), WHITE)
+    img.fill(curve(((50.5, hy + 1.6), (51.5, hy + 2.6), (52.5, hy + 2.2), (53, hy + 1)), 0.3), INK)
+
+
+def capy_body(kind, args):
+    """The capybara's body as an ellipse (cx, cy, rx, ry), in a pose."""
+    if kind == "nap":  # stretched out along the shell, breathing
+        swell = 0.3 * (1 - math.cos(args[0] * math.pi / 4))
+        return 21, 25.5, 14 + swell, 7 + swell
+    low = (
+        2.5 if kind == "crouch" else 0.5 * math.sin(args[0] * math.pi / 4) if kind == "walk" else 0
+    )
+    return 21, 21 + low, 10.5, 11.3 - low / 2
+
+
+MOUSE_FUR = (150, 140, 136)
+PERCH_X = 15  # where a riding mouse sits on the capybara's back, towards its rump
+
+
+def rider_sprite(kind, args, flip, k):
+    """A mouse sitting up on the back of a capybara in this pose, drawn to lay
+    over the capybara's own picture."""
     img = Img(math.ceil(7 * k), math.ceil(3 * k), k)
-    kind, args = pose_key[0], pose_key[1:]
-    step = args[0] if kind == "walk" else 0
-    bob = 0.5 * math.sin(step * math.pi / 2) if kind == "walk" else 0
-    if kind == "leap":
-        tilt = (0.08, 0.14, 0.07, 0.0)[args[1]]
-        img.move(-tilt if args[0] else tilt, (28, 32), (0, 0))
-    turtle(img, step)
-    fur, light, edge = (176, 128, 83), (204, 157, 105), (108, 77, 52)
-    asleep, crouched = kind == "nap", kind == "crouch"
-    hy = (26 if asleep else 22 if crouched else 19) + bob
-    by = (27 if asleep else 26 if crouched else 24) + bob
-    breath = 0.3 * (1 - math.cos(args[0] * math.pi / 4)) if asleep else 0
-    body = ellipse(24, by, 14 + breath, 7.5 + breath)
-    head = rbox(29, hy - 7, 48, hy + 8, 5.5)
-    ears = [ellipse(32, hy - 6, 2.8, 3.2), ellipse(41, hy - 6.5, 2.6, 3)]
-    for part in (body, head, *ears):
-        img.fill(grow(part, 0.65), edge)
-        img.fill(part, fur)
-    img.fill(ellipse(43, hy + 3.5, 7.5, 4.7), light)
-    for x in (32, 41):
-        img.fill(ellipse(x, hy - 6, 1.2, 1.6), edge, 0.65)
-    img.fill(poly((30, hy + 7), (38, hy + 8), (31, hy + 12)), (75, 133, 122))
-    paw = (34, 34 + bob)
-    if kind == "groom":
-        paw = (43, hy + 3 - args[0])
-    elif kind == "meow":
-        paw = (28, 10)
-    elif kind == "slap" and args[0] in (1, 2):
-        paw = (17, 24) if args[0] == 1 else (8, 30)
-    for start, end in (((19, by + 3), (18, 34 + bob)), ((32, by + 3), paw)):
-        leg = capsule(*start, *end, 2.2)
-        img.fill(grow(leg, 0.6), edge)
-        img.fill(leg, fur)
-        img.fill(ellipse(*end, 2.8, 1.7), light)
-    closed = asleep or kind in ("groom", "yawn") or (kind == "sit" and len(args) > 1 and args[1])
-    ey = hy - (1 if kind in ("look", "meow") else 0)
-    if closed:
-        img.fill(curve(((38, ey), (39, ey + 1), (40, ey + 1), (41, ey)), 0.5), INK)
-    else:
-        img.fill(ellipse(39.5, ey, 0.9, 1.1), INK)
-        img.fill(circle(39.2, ey - 0.4, 0.3), WHITE)
-    img.fill(ellipse(47, hy + 2, 0.9, 0.65), edge)
-    if kind in ("yawn", "meow", "hiss"):
-        img.fill(ellipse(44, hy + 6, 1.5, 1.6 if kind == "yawn" else 1), (104, 51, 44))
-    else:
-        img.fill(capsule(44, hy + 6, 48, hy + 5.5, 0.35), edge)
+    cx, cy, rx, ry = capy_body(kind, args)
+    x = PERCH_X
+    y = cy - ry * math.sqrt(1 - ((x - cx) / rx) ** 2) + 0.6  # its feet in the fur
+    edge = mix(MOUSE_FUR, INK, 0.45)
+    img.fill(
+        curve(((x - 2.5, y - 1.5), (x - 6, y - 1), (x - 6.5, y + 2), (x - 8, y + 3)), 0.4), PINK
+    )
+    outlined(img, ellipse(x, y - 2.6, 3.4, 2.7), MOUSE_FUR, edge, 0.5)
+    outlined(img, circle(x + 3, y - 4.6, 2.1), MOUSE_FUR, edge, 0.5)
+    img.fill(poly((x + 4.2, y - 5.9), (x + 6.6, y - 4.2), (x + 4.4, y - 3.2)), MOUSE_FUR)
+    img.fill(circle(x + 6.4, y - 4.3, 0.55), PINK)
+    outlined(img, circle(x + 1.9, y - 7, 1.5), MOUSE_FUR, edge, 0.5)
+    img.fill(circle(x + 1.9, y - 7, 0.8), PINK)
+    img.fill(circle(x + 3.9, y - 5.1, 0.5), INK)
+    img.fill(ellipse(x + 2.6, y - 0.4, 1.1, 0.6), PINK, 0.8)  # a paw holding on
     return img.mirror() if flip else img
+
+
+def capybara_sprite(coat, pose_key, flip, k):  # noqa: PLR0912, PLR0915
+    kind, args = pose_key[0], pose_key[1:]
+    img = Img(math.ceil(7 * k), math.ceil(3 * k), k)
+    stride = 0.0
+    if kind == "walk":
+        stride = math.sin(args[0] * math.pi / 4)
+    elif kind == "leap":  # like the cat, the pair tilts into the leap, legs out
+        stride = (0.5, 1, 0.7, 0)[args[1]]
+        tilt = (0.1, 0.16, 0.08, 0.0)[args[1]]
+        img.move(-tilt if args[0] else tilt, (28, 34), (0, 0))
+    asleep = kind == "nap"
+    draw_turtle(img, SHELLS[coat % len(SHELLS)], stride, asleep)
+    fur, dark, edge = CAPY_FUR, CAPY_DARK, mix(CAPY_FUR, INK, 0.5)
+    bob = 0.5 * stride if kind == "walk" else 0
+    if asleep:  # stretched out along the shell, chin down
+        body, (hx, hy) = ellipse(*capy_body(kind, args)), (33, 23)
+        shoulder, hand = (29, 28), (36, 30.5)
+    else:
+        low = 2.5 if kind == "crouch" else bob
+        body, (hx, hy) = ellipse(*capy_body(kind, args)), (31, 11 + low)
+        shoulder, hand = (27, 19.5 + low), (32.5, 24 + low)
+    eating = kind == "eat"
+    if eating:
+        hand = (34.5, 22.5)
+    elif kind == "groom":
+        hand = (hx + 9, hy + 6 - args[0])
+    elif kind == "meow":
+        hand = (37, 13)
+    elif kind == "slap" and args[0] in (1, 2):
+        hand = (38, 21) if args[0] == 1 else (46, 24)
+    # The body, with a haunch and two feet on the shell.
+    outlined(img, body, fur, edge)
+    if not asleep:
+        haunch = clip(ellipse(17, 26, 7.5, 6.5), body)
+        img.fill(clip(grow(haunch, 0.5), body), edge, 0.55)
+        img.fill(haunch, fur)
+        for x, y in ((21, 32.2), (27.5, 31.6)):
+            outlined(img, ellipse(x, y, 3.8, 1.6), dark, edge, 0.5)
+    # The head: a long, blunt block with a darker muzzle and small ears.
+    if kind in ("look", "meow"):  # nose up, towards the cards
+        img.move(-0.3, (hx - 5, hy + 4), (0, 0))
+    back = kind == "hiss"
+    head = union(ellipse(hx - 3, hy, 8, 7.2), rbox(hx - 3, hy - 6, hx + 13, hy + 6.5, 4.5))
+    outlined(img, ellipse(hx - 1.5, hy - 7, 1.9, 2.1), dark, edge, 0.6)
+    outlined(img, head, fur, edge)
+    img.fill(clip(rbox(hx + 7.5, hy - 8, hx + 15, hy + 8, 2.5), head), dark, 0.9)
+    img.fill(clip(ellipse(hx + 2, hy - 6, 6, 1.2), head), WHITE, 0.2)
+    ear = ellipse(hx - (8 if back else 6), hy - (5.5 if back else 6.5), 2.4, 2.7)
+    outlined(img, ear, fur, edge, 0.6)
+    img.fill(grow(ear, -1.1), dark)
+    img.fill(ellipse(hx + 11, hy - 2.5, 0.9, 0.6), INK)
+    closed = asleep or kind in ("groom", "yawn") or (kind == "sit" and len(args) > 1 and args[1])
+    ex, ey = hx + 1.5, hy - 2
+    if closed:
+        img.fill(
+            curve(
+                ((ex - 1.5, ey), (ex - 0.5, ey + 1.3), (ex + 0.5, ey + 1.3), (ex + 1.5, ey)), 0.5
+            ),
+            INK,
+        )
+    else:
+        img.fill(ellipse(ex, ey, 1.3, 1.6), INK)
+        img.fill(circle(ex - 0.3, ey - 0.6, 0.45), WHITE)
+    if back:
+        img.fill(capsule(ex - 2, ey - 3.2, ex + 2, ey - 2, 0.45), INK)
+    if kind in ("yawn", "meow", "hiss") or (eating and args[1]):
+        img.fill(ellipse(hx + 9, hy + 4, 2.2, 2.4 if kind == "yawn" else 1.7), (120, 40, 52))
+    else:
+        img.fill(capsule(hx + 6.5, hy + 3.6, hx + 11.5, hy + 3, 0.4), INK, 0.8)
+    if kind != "leap":
+        img.moved = None
+    if eating:
+        draw_apple(img, hand[0] + 2.5, hand[1] - 1.5, args[0])
+    outlined(img, capsule(*shoulder, *hand, 1.9), fur, edge, 0.6)
+    outlined(img, ellipse(*hand, 2.2, 1.8), dark, edge, 0.5)
+    return img.mirror() if flip else img
+
+
+def draw_apple(img, cx, cy, bites):
+    """The apple in the capybara's paw, bitten from the top, where its mouth is."""
+    marks = [circle(cx + 3.4 - i * 2.4, cy - 2.8, 2) for i in range(bites)]
+    apple = circle(cx, cy, 3.4)
+    outlined(img, apple, (250, 232, 190), mix(APPLE, INK, 0.5), 0.5)  # its flesh shows in the bites
+    img.fill(
+        clip(apple, (lambda x, y: max([-m[0](x, y) for m in marks], default=-1), apple[1])), APPLE
+    )
+    img.fill(circle(cx - 1.3, cy + 0.6, 0.7), WHITE, 0.6)
+    if not bites:
+        img.fill(capsule(cx, cy - 3, cx + 0.6, cy - 4.8, 0.35), (96, 62, 40))
+        img.fill(ellipse(cx + 2, cy - 4.6, 1.5, 0.8), (104, 170, 80))
 
 
 HEART_FRAMES = 16
@@ -1311,7 +1504,7 @@ def ground_img(cols, k):
 
 def mouse_sprite(step, flip, k):
     """A little grey mouse from above, scurrying right."""
-    img, fur = ground_img(3, k), (150, 140, 136)
+    img, fur = ground_img(3, k), MOUSE_FUR
     wag = 1.2 if step else -1.2
     img.fill(path(((7, 9.5), (3.5, 9.5 + wag), (0.8, 9.5 - wag)), 0.5), PINK)
     for x, y in (
@@ -1340,24 +1533,6 @@ def treat_sprite(bites, k):
     img.fill(clip(fish, eaten), (214, 160, 96))
     if bites == 0:
         img.fill(circle(11.8, 12, 0.5), INK)
-    return img
-
-
-def lettuce_sprite(bites, k):
-    """A ruffled lettuce leaf, eaten from the right in the fish treat's four stages."""
-    img = ground_img(2, k)
-    leaf = union(
-        ellipse(7.5, 11, 5, 3.8),
-        *(circle(x, y, 2) for x, y in ((4, 9), (7, 7.8), (10, 8.5), (12, 10.5))),
-        poly((2, 14.5), (5, 10), (12, 13)),
-    )
-    eaten = rbox(0, 0, 14.5 - bites * 3.5, 16, 0)
-    img.fill(clip(grow(leaf, 0.5), eaten), (50, 103, 45))
-    img.fill(clip(leaf, eaten), (119, 184, 75))
-    veins = path(((2, 14), (6, 12), (11.5, 9)), 0.45)
-    for x in (5, 8):
-        veins = union(veins, path(((x, 13), (x, 9), (x - 1, 8)), 0.3))
-    img.fill(clip(clip(veins, leaf), eaten), (204, 224, 135))
     return img
 
 
@@ -1403,14 +1578,15 @@ def bun_sprite(kind, bites=0):
 SPRITES = {
     "mouse": mouse_sprite,
     "treat": treat_sprite,
-    "lettuce": lettuce_sprite,
     "bun": bun_sprite,
     "hearts": hearts_sprite,
     "cup": cup_sprite,
     "latte": latte_sprite,
+    "boba": boba_sprite,
     "knock": knock_sprite,
     "cat": cat_sprite,
     "capybara": capybara_sprite,
+    "rider": rider_sprite,
 }
 
 
@@ -1489,9 +1665,9 @@ class Cat:
 
     MIN_X = 5  # how close its middle gets to the frame's sides
 
-    def __init__(self, now, home, key="cat", *, capybara=False):
+    def __init__(self, now, home, key="cat", species="cat"):
         self.key = key  # its pictures' names, so a visiting cat can share the bar
-        self.capybara = capybara
+        self.species = species  # "cat", or "capybara": the same barista, drawn on a turtle
         self.coat = random.randrange(len(COATS))
         self.name = random.choice(CAT_NAMES)
         self.x = self.goal = float(home)
@@ -1503,11 +1679,12 @@ class Cat:
         self.pets, self.petted_at, self.target = 0, 0.0, None
         self.errand = None  # why it's off to its target: "new", "ready", "biscuit" or "knock"
         self.fed, self.chasing, self.sleepy = [], False, False
+        self.rider = False  # a mouse sitting on a capybara's back
 
     @property
     def title(self):
-        if self.capybara:
-            return f"{self.name} the capybara riding a turtle"
+        if self.species == "capybara":
+            return f"{self.name} the capybara"
         return f"{self.name} the {COATS[self.coat][0]} cat"
 
     def go(self, x, y=0):
@@ -1616,8 +1793,8 @@ class Cat:
         speed = CHASE_SPEED if self.chasing else self.speed
         if self.target is not None:  # off to see to a cup: it trots
             speed = max(speed, ERRAND_SPEED)
-        if self.capybara:
-            speed *= 0.5
+        if self.species == "capybara":
+            speed *= TURTLE_PACE
         if self.goal_y != self.y:
             if not self.y and abs(goal - self.x) > speed * dt:
                 self._stride(goal, speed * dt)
@@ -1627,7 +1804,7 @@ class Cat:
             self.leap = {
                 "from": (self.x, self.y),
                 "to": (to_x, self.goal_y),
-                "time": (0.35 + 0.025 * abs(self.goal_y - self.y)) * (2 if self.capybara else 1),
+                "time": 0.35 + 0.025 * abs(self.goal_y - self.y),
                 "up": self.goal_y < self.y,
             }
             self.mode, self.until = "crouch", now + CROUCH_S
@@ -1666,8 +1843,9 @@ class Cat:
             else 0
         )
         chew = (("yawn",) if int(now * 4) % 2 else ("sit", 0, True), False)
+        stride = 0.8 * (TURTLE_PACE if self.species == "capybara" else 1)  # cols per walk frame
         poses = {
-            "walk": (("walk", int(self.distance / 0.8) % 8), mirrored),
+            "walk": (("walk", int(self.distance / stride) % 8), mirrored),
             "crouch": (("crouch",), False),
             "leap": (("leap", bool(flight and flight["up"]), stage), mirrored),
             "nap": (("nap", int(now * 2) % 8), mirrored),
@@ -1684,22 +1862,33 @@ class Cat:
                 False,
             ),
         }
-        return poses.get(self.mode, (("sit", int(now * 1.5) % 8, now % 5 < 0.25), False))
+        pose, flip = poses.get(self.mode, (("sit", int(now * 1.5) % 8, now % 5 < 0.25), False))
+        if self.species == "capybara":
+            # Drawn from the side, it keeps facing its way, or the cup on its left
+            # that it swats. It eats an apple from its paw.
+            flip = mirrored or self.mode == "slap"
+            if self.mode == "eat":
+                pose = ("eat", self._bites(now), int(now * 4) % 2)
+        return pose, flip
+
+    def _bites(self, now):
+        """How much of its treat is gone, from 0 to 3."""
+        return min(3, int((now - self.fed[-1]) / 0.6))
 
     def place(self, frame, art, top, k, now):
         """Put the cat's picture in `frame`, and its zZ in the strip's text `art` rows."""
         pose, flip = self.pose(now)
         cols, rows, cat_rows = math.ceil(7 * k), len(art), math.ceil(3 * k)
         left, row = self.x - cols // 2, top + rows - cat_rows + self.y
-        sprite = ("capybara", pose, flip, k) if self.capybara else ("cat", self.coat, pose, flip, k)
-        frame.pics[self.key] = (sprite, left, row, 3)
+        frame.pics[self.key] = ((self.species, self.coat, pose, flip, k), left, row, 3)
+        if self.rider and self.species == "capybara":
+            frame.pics[(self.key, "rider")] = (("rider", pose[0], pose[1:], flip, k), left, row, 4)
         if self.mode == "purr":
             beat = int((now - self.petted_at) / 0.1) % HEART_FRAMES
             frame.pics[(self.key, "hearts")] = (("hearts", beat), left + 2, max(0, row - 2), 4)
-        if self.mode == "eat":
-            bites = min(3, int((now - self.fed[-1]) / 0.6))
-            treat = "lettuce" if self.capybara else "treat"
-            frame.pics[(self.key, "treat")] = ((treat, bites, k), left, row + cat_rows - 1, 3)
+        if self.mode == "eat" and self.species == "cat":
+            treat = ("treat", self._bites(now), k)
+            frame.pics[(self.key, "treat")] = (treat, left, row + cat_rows - 1, 3)
         if pose[0] == "nap" and not self.y:
             for i, ch in enumerate("zZ"):
                 r = rows - cat_rows - (int(now * 1.5) + i) % 2
@@ -1779,11 +1968,24 @@ def poured(state, pid, now):
     return (now - seen) / POUR_S if now - seen < POUR_S else None
 
 
+def app_drink(state):
+    """What an open app gets: a latte from the cat, boba tea from the capybara."""
+    return "boba" if state["cat"].species == "capybara" else "latte"
+
+
+def leaving_drink(state, pid):
+    """A closed app's drink stays the one it was served, whoever runs the bar now."""
+    cup = state["leaving"][pid]
+    if not is_app(cup):
+        return "cup"
+    return state.get("drinks", {}).get(pid) or app_drink(state)
+
+
 def cup_look(state, pid, now, k):
-    """The sprite key for a card's cup, or an app's latte, at this moment."""
+    """The sprite key for a card's cup, or an app's latte or boba, at this moment."""
     if pid in state["leaving"]:
         cup = state["leaving"][pid]
-        drink, ended = ("latte" if is_app(cup) else "cup"), cup[2]
+        drink, ended = leaving_drink(state, pid), cup[2]
         knocked = state["knocked"].get(pid, now + 1)
         if knocked <= now:
             frame = min(KNOCK_FRAMES - 1, int((now - knocked) / KNOCK_S * KNOCK_FRAMES))
@@ -1792,16 +1994,14 @@ def cup_look(state, pid, now, k):
     session = state["live"][pid]
     kind, _, _, cpu, _ = session
     glaze = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][2]
-    drink = "latte" if is_app(session) else "cup"
+    drink = app_drink(state) if is_app(session) else "cup"
     pour = poured(state, pid, now)
     if pour is not None:
         return (drink, glaze, "pour", int(pour * POUR_FRAMES), k)
     stir = int(now / (0.075 if cpu >= BUSY_CPU else 0.15)) % STIR_FRAMES  # faster when busier
-    if drink == "latte":
+    if drink != "cup":
         return (
-            ("latte", glaze, "busy", stir, k)
-            if cpu >= WORKING_CPU
-            else ("latte", glaze, "open", 0, k)
+            (drink, glaze, "busy", stir, k) if cpu >= WORKING_CPU else (drink, glaze, "open", 0, k)
         )
     word = session_state(state, pid, now)[0]
     return ("cup", glaze, word, stir if word == "brewing" else 0, k)
@@ -1905,7 +2105,8 @@ def cat_visit(state, now):
         state["knocked"][pid] = now + 0.3  # the paw lands a moment after the swing starts
         state["broken"] += 1
         cup = state["leaving"][pid]
-        drink = "latte" if is_app(cup) else "cup"
+        drink = leaving_drink(state, pid)
+        drink = DRINK_NAMES.get(drink, drink)
         state["toast"] = (
             f"{cat.name} knocked {DRINKS[cup[0]][0]}'s {drink} off the table.",
             now + 4,
@@ -1932,17 +2133,24 @@ def bar_life(state, now, frame, art, *, top, k, free_x, home=None):  # noqa: PLR
     if "mouse" in due and "guest" not in state and on_table:
         due.discard("mouse")
         side = 1 if cat.x < lane / 2 else -1
-        x, speed = cat.x + side * random.uniform(6, 10), random.uniform(10, 20)
-        state["mouse"] = {"x": x, "dir": side, "speed": speed, "last": now}
-        cat.chasing = home is None and cat.mode != "nap"  # an empty bar's cat stays home
-        quip = "gives chase" if cat.chasing else "just watches"
-        quip = "sleeps right through it" if cat.mode == "nap" else quip
-        state["toast"] = (f"A mouse! {cat.name} {quip}.", now + 3)
+        if cat.species == "capybara":  # nothing to run from: it comes over for a ride
+            x = min(max(cat.x + side * random.uniform(10, 16), lane_ends[0]), lane_ends[1])
+            speed = random.uniform(6, 9)
+            state["mouse"] = {"x": x, "dir": -side, "speed": speed, "last": now, "since": now}
+            state["toast"] = (f"A mouse! It scurries over to {cat.name}.", now + 3)
+        else:
+            x, speed = cat.x + side * random.uniform(6, 10), random.uniform(10, 20)
+            state["mouse"] = {"x": x, "dir": side, "speed": speed, "last": now}
+            cat.chasing = home is None and cat.mode != "nap"  # an empty bar's cat stays home
+            quip = "gives chase" if cat.chasing else "just watches"
+            quip = "sleeps right through it" if cat.mode == "nap" else quip
+            state["toast"] = (f"A mouse! {cat.name} {quip}.", now + 3)
     if "mouse" in state:
         run_mouse(state, now, frame, (top + len(art) - 1, k), lane_ends)
     if "guest" in due and "mouse" not in state and on_table and lane >= 40:
         due.discard("guest")
-        guest = Cat(now, lane_ends[0] if cat.x > lane / 2 else lane_ends[1], key="guest")
+        edge_x = lane_ends[0] if cat.x > lane / 2 else lane_ends[1]
+        guest = Cat(now, edge_x, key="guest", species=cat.species)  # a stray of its own kind
         guest.coat = random.choice([c for c in range(len(COATS)) if c != cat.coat])
         guest.name = random.choice([n for n in CAT_NAMES if n != cat.name])
         guest.mode, guest.speed = "walk", 6.0
@@ -1979,8 +2187,12 @@ def nibble(state, now, bun, spot):
 
 def run_mouse(state, now, frame, spot, lane_ends):
     """The mouse dashes for the edge of the table. The cat runs at CHASE_SPEED,
-    so it catches slower mice; faster ones get away."""
+    so it catches slower mice; faster ones get away. A capybara it rides instead."""
     (row, k), cat, mouse = spot, state["cat"], state["mouse"]
+    visiting = mouse.get("riding") or cat.species == "capybara"
+    if visiting and not mouse.get("done") and ride_capybara(state, now):
+        mouse["last"] = now
+        return  # it's drawn on the capybara's back
     mouse["x"] += mouse["dir"] * mouse["speed"] * min(0.5, now - mouse["last"])
     mouse["last"] = now
     if cat.chasing and abs(cat.x - mouse["x"]) < 2.5:
@@ -2000,6 +2212,37 @@ def run_mouse(state, now, frame, spot, lane_ends):
             cat.goal, cat.goal_y, cat.mode, cat.plan = mouse["x"], 0.0, "walk", []
         left = mouse["x"] - math.ceil(3 * k) / 2
         frame.pics["mouse"] = (("mouse", int(now * 10) % 2, mouse["dir"] < 0, k), left, row, 1)
+
+
+RIDE_S, MOUSE_PATIENCE_S = (6, 10), 20
+
+
+def ride_capybara(state, now):
+    """A mouse scurries over to a capybara and climbs on its back for a ride,
+    then hops off and away. Returns whether it's riding."""
+    cat, mouse = state["cat"], state["mouse"]
+    cat.chasing = False  # capybaras don't hunt, even one that was a cat a moment ago
+    on_table = not cat.y and cat.leap is None
+    if mouse.get("riding"):
+        if now < mouse["riding"] and on_table and cat.species == "capybara":
+            return True
+        del mouse["riding"]
+        cat.rider = False
+        mouse.update(x=cat.x, dir=random.choice((-1, 1)), speed=12.0, last=now, done=True)
+        state["toast"] = (f"The mouse hops off {cat.name} and scurries away.", now + 3)
+        return False
+    if now - mouse.setdefault("since", now) > MOUSE_PATIENCE_S:  # the capybara stayed busy
+        mouse.update(dir=1 if mouse["x"] > cat.x else -1, done=True)
+        return False
+    if on_table and abs(cat.x - mouse["x"]) < 2:
+        mouse["riding"] = now + random.uniform(*RIDE_S)
+        cat.rider = True
+        state["rides"] = state.get("rides", 0) + 1
+        who = f"{cat.name}, who doesn't wake" if cat.mode == "nap" else cat.name
+        state["toast"] = (f"The mouse climbs onto {who} for a ride.", now + 4)
+        return True
+    mouse["dir"] = 1 if cat.x > mouse["x"] else -1
+    return False
 
 
 def run_guest(state, now, lane_ends):
@@ -2193,7 +2436,12 @@ def top_edge(state, now, width):
 def bottom_edge(state, width):
     """The frame's bottom edge, with the longest key hint that fits."""
     name = state["cat"].name
-    for hint in (f"p to pet {name} · f to feed · q to close", "p pet · f feed · q quit", "q quit"):
+    other = "cat" if state["cat"].species == "capybara" else "capybara"
+    for hint in (
+        f"p to pet {name} · f to feed · c for a {other} · q to close",
+        f"p pet · f feed · c {other} · q quit",
+        "q quit",
+    ):
         line = edge(f"{DIM}{hint}{RESET}", "", width, "╰╯")
         if line:
             return line
@@ -2254,6 +2502,7 @@ def update(state):
     for pid in [p for p in state["leaving"] if gone(state, p, now)]:
         del state["leaving"][pid]
         state["knocked"].pop(pid, None)
+        state.get("drinks", {}).pop(pid, None)
         state.get("projects", {}).pop(pid, None)
         state.get("cwds", {}).pop(pid, None)
     live = scan_agents()
@@ -2329,7 +2578,8 @@ def take_orders(state, live, now):
         state["leaving"][pid] = (kind, tty_name, now, started)
         state["visit"] = pid, "knock"
         name = DRINKS[kind][0]
-        if tty_name.startswith("app:"):  # an app's latte goes, but it's no order
+        if tty_name.startswith("app:"):  # an app's drink goes, but it's no order
+            state.setdefault("drinks", {})[pid] = app_drink(state)  # it stays what it was
             state["toast"] = (f"{name} settled its tab ✔", now + 5)
             continue
         state["orders"][name] = state["orders"].get(name, 0) + 1
@@ -2399,6 +2649,8 @@ def receipt(state, now):
         items.append((f"Cups broken by {cat.name}", str(state["broken"])))
     if state.get("mice"):
         items.append((f"Mice caught by {cat.name}", str(state["mice"])))
+    if state.get("rides"):
+        items.append((f"Mice given a ride by {cat.name}", str(state["rides"])))
     stats = [("Mac kept awake", fmt_dur(awake))]
     if agent_time >= 1:
         stats.append(("Agent time", f"{fmt_dur(agent_time)} ({agent_time / awake:.1f}×)"))
@@ -2408,7 +2660,7 @@ def receipt(state, now):
         stats.append(("Still brewing", str(len(brewing))))
     stats.append(("Barista", cat.name))
     if state.get("visitors"):
-        stats.append(("Visiting cats", str(state["visitors"])))
+        stats.append(("Visitors", str(state["visitors"])))
     sections = [items, stats]
     tips = [f"{cat.pets} pet{'s' * (cat.pets > 1)} ♥"] if cat.pets else []
     if cat.fed:
@@ -2530,9 +2782,12 @@ def on_key(state, key):
         state["toast"] = (f"{cat.name} purrs. ♥", now + 3)
     elif key == "f":
         ate = cat.feed(now)
-        food = "lettuce" if cat.capybara else "a treat"
+        food = "an apple" if cat.species == "capybara" else "a treat"
         treat = f"{cat.name} munches {food}." if ate else f"{cat.name} is full. Maybe later."
         state["toast"] = (treat, now + 3)
+    elif key == "c":
+        cat.species = "cat" if cat.species == "capybara" else "capybara"
+        state["toast"] = (f"{cat.title} takes over the bar.", now + 4)
     return key == "q"
 
 
@@ -2564,13 +2819,13 @@ def check_args():
         sys.exit("usage: caffe [--capybara | update]   (press q to quit)")
     if not sys.stdin.isatty():
         sys.exit("caffe needs an interactive terminal.")
-    return sys.argv[1:] == ["--capybara"]
+    return "capybara" if sys.argv[1:] == ["--capybara"] else "cat"
 
 
 def main():
-    capybara = check_args()
+    species = check_args()
     caf = start_caffeinate()
-    cat = Cat(time.time(), HOME_X, capybara=capybara)
+    cat = Cat(time.time(), HOME_X, species=species)
     state = {
         "start": time.time(),
         "live": {},
