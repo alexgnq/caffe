@@ -121,6 +121,47 @@ class MischiefTests(unittest.TestCase):
         self.assertNotIn("mice", state)
         self.assertIn("got away", state["toast"][0])
 
+    def test_a_mouse_rides_a_capybara_instead_of_being_chased(self):
+        state = bar()
+        capy = state["cat"]
+        capy.species = "capybara"
+        play(state, 0, 0.5)
+        state["due"] = {"mouse"}
+        play(state, 0.5, 0.7)
+        self.assertIn("scurries over to", state["toast"][0])
+        frame = play(state, 0.7, 4)
+        self.assertTrue(capy.rider)
+        self.assertIn("climbs onto", state["toast"][0])
+        self.assertNotIn("mouse", frame.pics)  # it's on the capybara's back instead
+        rider = frame.pics["cat", "rider"]
+        self.assertEqual(rider[1:3], frame.pics["cat"][1:3])
+        caffe["SPRITES"][rider[0][0]](*rider[0][1:])
+        play(state, 4, 20)
+        self.assertNotIn("mouse", state)
+        self.assertFalse(capy.rider or capy.chasing)
+        self.assertEqual((state.get("rides"), state.get("mice")), (1, None))
+        state.update(orders={}, agent_time=0, order=1, longest=(0, ""))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            caffe["receipt"](state, 20)
+        self.assertIn(f"Mice given a ride by {capy.name}", out.getvalue())
+
+    def test_a_riding_mouse_hops_off_when_the_capybara_becomes_a_cat(self):
+        state = bar()
+        state["cat"].species = "capybara"
+        play(state, 0, 0.5)
+        state["due"] = {"mouse"}
+        play(state, 0.5, 4)
+        self.assertTrue(state["cat"].rider)
+        with patch("time.time", return_value=4):
+            caffe["on_key"](state, "c")
+        frame = play(state, 4, 4.3)
+        self.assertFalse(state["cat"].rider)
+        self.assertIn("hops off", state["toast"][0])
+        self.assertIn("mouse", frame.pics)
+        self.assertNotIn(("cat", "rider"), frame.pics)
+        self.assertFalse(state["cat"].chasing)
+
     def test_sleeping_cat_ignores_mice(self):
         state = bar(due={"mouse"})
         state["cat"].mode = "nap"
@@ -194,7 +235,7 @@ class ReceiptTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             caffe["receipt"](state, 60)
-        for line in ("Mice caught by", "Visiting cats", "Tip for", "1 treat"):
+        for line in ("Mice caught by", "Visitors", "Tip for", "1 treat"):
             self.assertIn(line, out.getvalue())
 
 

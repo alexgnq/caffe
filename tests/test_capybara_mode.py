@@ -11,10 +11,10 @@ caffe = runpy.run_path(str(Path(__file__).resolve().parents[1] / "caffe"))
 GLOBALS = caffe["main"].__globals__
 
 
-def bar(capybara=True, **changes):
+def bar(species="capybara", **changes):
     state = {
         "start": 0,
-        "cat": caffe["Cat"](0, caffe["HOME_X"], capybara=capybara),
+        "cat": caffe["Cat"](0, caffe["HOME_X"], species=species),
         "live": {},
         "leaving": {},
         "knocked": {},
@@ -52,9 +52,9 @@ class CapybaraModeTests(unittest.TestCase):
             patch("subprocess.run") as run,
             patch.dict(GLOBALS, self_update=updater),
         ):
-            for args, selected in (([], False), (["--capybara"], True)):
+            for args, selected in (([], "cat"), (["--capybara"], "capybara")):
                 with self.subTest(args=args), patch("sys.argv", ["caffe", *args]):
-                    self.assertIs(caffe["check_args"](), selected)
+                    self.assertEqual(caffe["check_args"](), selected)
             for alias in ("-h", "--help"):
                 out = io.StringIO()
                 with (
@@ -65,7 +65,7 @@ class CapybaraModeTests(unittest.TestCase):
                 ):
                     caffe["check_args"]()
                 self.assertEqual(exited.exception.code, 0)
-                for text in ("--capybara", "turtle", "half", "lettuce", "caffe update"):
+                for text in ("--capybara", "turtle", "Press c", "caffe update"):
                     self.assertIn(text, out.getvalue())
             for args in (
                 ["--unknown"],
@@ -110,7 +110,7 @@ class CapybaraModeTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_startup_uses_selected_mode(self):
-        for args, selected in (([], False), (["--capybara"], True)):
+        for args, selected in (([], "cat"), (["--capybara"], "capybara")):
             with self.subTest(args=args):
                 stdin, caf, states = Mock(), Mock(), []
                 stdin.isatty.return_value, stdin.fileno.return_value = True, 10
@@ -147,9 +147,9 @@ class CapybaraModeTests(unittest.TestCase):
                     caffe["main"]()
                 self.assertEqual(len(states), 1)
                 resident = states[0]["cat"]
-                self.assertIs(resident.capybara, selected)
-                self.assertEqual(place(resident)["cat"][0][0], "capybara" if selected else "cat")
-                self.assertIn("capybara riding a turtle" if selected else "cat", resident.title)
+                self.assertEqual(resident.species, selected)
+                self.assertEqual(place(resident)["cat"][0][0], selected)
+                self.assertIn(selected, resident.title)
                 self.assertIn(resident.title, states[0]["toast"][0])
                 starter.assert_called_once_with()
                 caf.terminate.assert_called_once_with()
@@ -158,101 +158,56 @@ class CapybaraModeTests(unittest.TestCase):
                 popen.assert_not_called()
                 run.assert_not_called()
 
-    def test_default_cat_and_visitors_stay_cats(self):
-        cat = caffe["Cat"](0, 40)
-        self.assertFalse(cat.capybara)
-        self.assertEqual(cat.speed, 7)
-        self.assertIn(caffe["COATS"][cat.coat][0], cat.title)
-        self.assertEqual(place(cat)["cat"][0], ("cat", cat.coat, *cat.pose(0), 1.0))
-        self.assertTrue(cat.feed(0))
-        self.assertEqual(place(cat)[("cat", "treat")][0], ("treat", 0, 1.0))
-        state = bar(due={"guest"})
-        state["cat"].x, state["cat"].mode, state["cat"].until = 40, "sit", 100
-        with patch("random.random", return_value=0.99):
-            _, pics = caffe["render"](state, 1, (80, 24))
-        guest = state["guest"]["cat"]
-        self.assertFalse(guest.capybara)
-        self.assertEqual(pics["cat"][0][0], "capybara")
-        self.assertEqual(pics["guest"][0][0], "cat")
-        self.assertIn("cat", guest.title)
-        self.assertTrue(guest.feed(1))
-        self.assertEqual(place(guest, 1)[("guest", "treat")][0], ("treat", 0, 1.0))
-        state = bar(capybara=False)
+    def test_c_swaps_the_barista_and_back(self):
+        state = bar("cat")
+        cat = state["cat"]
+        self.assertIn("c for a capybara", caffe["bottom_edge"](state, 120))
         with patch("time.time", return_value=0):
-            caffe["on_key"](state, "f")
-        self.assertEqual(state["toast"][0], f"{state['cat'].name} munches a treat.")
+            self.assertFalse(caffe["on_key"](state, "c"))
+            self.assertEqual(cat.species, "capybara")
+            self.assertEqual(state["toast"][0], f"{cat.name} the capybara takes over the bar.")
+            self.assertEqual(place(cat)["cat"][0][:2], ("capybara", cat.coat))
+            self.assertIn("c for a cat", caffe["bottom_edge"](state, 120))
+            caffe["on_key"](state, "c")
+        self.assertEqual(cat.species, "cat")
+        self.assertIn(caffe["COATS"][cat.coat][0], state["toast"][0])
+        self.assertEqual(place(cat)["cat"][0], ("cat", cat.coat, *cat.pose(0), 1.0))
 
-    def test_capybara_moves_at_half_speed_in_all_contexts(self):
-        for part in ("day", "night"):
-            for rush in (False, True):
-                for chasing in (False, True):
-                    for errand in (None, "new", "ready", "biscuit", "knock"):
-                        with self.subTest(part=part, rush=rush, chasing=chasing, errand=errand):
-                            states = [bar(capybara=mode, rush=rush) for mode in (False, True)]
-                            base = 12 if rush else 5 if part == "night" else 7
-                            speed = caffe["CHASE_SPEED"] if chasing else base
-                            if errand:
-                                speed = max(speed, caffe["ERRAND_SPEED"])
-                            with (
-                                patch.dict(GLOBALS, daypart=Mock(return_value=part)),
-                                patch("random.random", return_value=0.99),
-                            ):
-                                for state in states:
-                                    cat = state["cat"]
-                                    cat.x = 20
-                                    cat.go(160)
-                                    cat.chasing = chasing
-                                    cat.target, cat.errand = (1, errand) if errand else (None, None)
-                                    for tick in range(1, 6):
-                                        now = tick / 10
-                                        caffe["bar_clock"](state, now)
-                                        caffe["bar_clock"](state, now)
-                                        cat.step(now, 200, False, 5)
-                                    self.assertEqual(cat.speed, base)
-                            normal, capy = (state["cat"] for state in states)
-                            self.assertAlmostEqual(normal.x - 20, speed * 0.5)
-                            self.assertAlmostEqual(capy.x - 20, speed * 0.25)
-                            self.assertAlmostEqual(normal.distance, capy.distance * 2)
-        # Animation still follows distance, not time or the choice of animal.
-        cat, capy = caffe["Cat"](0, 10), caffe["Cat"](0, 10, capybara=True)
+    def test_visitors_are_the_baristas_kind(self):
+        for species in ("cat", "capybara"):
+            with self.subTest(species=species):
+                state = bar(species, due={"guest"})
+                state["cat"].x, state["cat"].mode, state["cat"].until = 40, "sit", 100
+                with patch("random.random", return_value=0.99):
+                    _, pics = caffe["render"](state, 1, (80, 24))
+                guest = state["guest"]["cat"]
+                self.assertEqual(guest.species, species)
+                self.assertEqual(pics["guest"][0][0], species)
+                self.assertNotEqual(pics["guest"][0][1], pics["cat"][0][1])  # another coat or shell
+                self.assertIn(species, guest.title)
+                self.assertIn(guest.title, state["toast"][0])
+
+    def test_turtle_walks_at_half_speed_in_short_steps_and_leaps_like_the_cat(self):
+        cat, capy = caffe["Cat"](0, 20), caffe["Cat"](0, 20, species="capybara")
         for animal in (cat, capy):
-            animal.go(30)
-            before = animal.pose(0)
-            self.assertEqual(animal.pose(0.1), before)
-        cat.step(0.2, 80, False, 5)
-        capy.step(0.4, 80, False, 5)
-        self.assertEqual(cat.x, capy.x)
-        self.assertEqual(cat.pose(0.2), capy.pose(0.4))
-        capy.go(capy.x + 0.1)
-        capy.target = 1
-        capy.step(0.5, 80, False, 5)
-        self.assertEqual(capy.x, capy.goal)
-        self.assertEqual(capy.mode, "look")
+            animal.go(60)
+            for tick in range(1, 6):
+                animal.step(tick / 10, 80, False, 5)
+        self.assertAlmostEqual(capy.x - 20, (cat.x - 20) / 2)
+        self.assertEqual(capy.pose(0.5), cat.pose(0.5))  # its legs keep the cat's rhythm
+        for animal in (cat, capy):
+            animal.go(animal.x, -4)
+            animal.step(0.6, 80, False, 5)
+        self.assertEqual(capy.leap["time"], cat.leap["time"])
 
-    def test_capybara_leaps_slower_and_lands_on_target(self):
-        for start, end in ((0, -4), (-4, 0)):
-            animals = [caffe["Cat"](0, 20, capybara=mode) for mode in (False, True)]
-            for animal in animals:
-                animal.y = start
-                animal.go(20, end)
-                animal.step(0, 80, False, 5)
-                self.assertEqual(animal.mode, "crouch")
-                animal.step(caffe["CROUCH_S"], 80, False, 5)
-                self.assertEqual(animal.mode, "leap")
-            normal, capy = animals
-            self.assertAlmostEqual(capy.leap["time"], normal.leap["time"] * 2)
-            launch, duration = capy.leap["start"], capy.leap["time"]
-            normal.step(launch + duration / 2, 80, False, 5)
-            capy.step(launch + duration / 2, 80, False, 5)
-            self.assertEqual((normal.x, normal.y), (20, end))
-            self.assertEqual(normal.mode, "walk")
-            self.assertEqual(capy.mode, "leap")
-            self.assertLess(capy.y, (start + end) / 2)
-            capy.step(launch + duration, 80, False, 5)
-            self.assertEqual((capy.x, capy.y), (20, end))
-            self.assertIsNone(capy.leap)
-            capy.step(launch + duration + 0.1, 80, False, 5)
-            self.assertEqual(capy.y, end)
+    def test_capybara_faces_its_way_and_the_cup_it_swats(self):
+        capy = caffe["Cat"](0, 20, species="capybara")
+        capy.mode, capy.until = "sit", 10
+        for direction in (-1, 1):
+            capy.dir = direction
+            self.assertEqual(capy.pose(0)[1], direction < 0)
+        capy.slap(0)
+        self.assertTrue(capy.pose(0)[1])
 
     def test_all_capybara_poses_include_rider_and_turtle(self):
         expected = {
@@ -263,12 +218,14 @@ class CapybaraModeTests(unittest.TestCase):
             *(("groom", i) for i in (1, 2)),
             *(("slap", i) for i in (1, 2, 3)),
             *(("leap", up, i) for up in (False, True) for i in range(4)),
+            *(("eat", bites, chew) for bites in range(4) for chew in (0, 1)),
             ("yawn",),
             ("hiss",),
             ("meow",),
             ("crouch",),
         }
-        cat, emitted = caffe["Cat"](0, 20, capybara=True), set()
+        cat, emitted = caffe["Cat"](0, 20, species="capybara"), set()
+        cat.fed = [0]
         modes = ("sit", "walk", "nap", "look", "groom", "purr", "eat", "nibble", "yawn")
         for mode in (*modes, "hiss", "meow", "crouch", "slap", "leap"):
             cat.mode, cat.until = mode, 1.6
@@ -283,7 +240,9 @@ class CapybaraModeTests(unittest.TestCase):
         for pose in sorted(emitted):
             for k in (1.0, 2 / 3):
                 with self.subTest(pose=pose, scale=k):
-                    images = [caffe["SPRITES"]["capybara"](pose, flip, k) for flip in (False, True)]
+                    images = [
+                        caffe["SPRITES"]["capybara"](0, pose, flip, k) for flip in (False, True)
+                    ]
                     self.assertEqual(images[1].buf, mirror_bytes(images[0]))
                     self.assertNotEqual(images[0].buf, images[1].buf)
                     for img in images:
@@ -297,16 +256,20 @@ class CapybaraModeTests(unittest.TestCase):
                                 if a < 200:
                                     continue
                                 unit_y = (y + 0.5) / (2 * k)
-                                rider += 8 < unit_y < 34 and r > g * 1.2 and g > b * 1.2
-                                turtle += 34 < unit_y < 46 and g > r * 1.15 and g > b * 1.2
+                                rider += unit_y < 31 and r > g * 1.2 and g > b * 1.2
+                                turtle += 28 < unit_y < 47 and g > r * 1.15 and g > b * 1.2
                         self.assertGreater(rider, 200 * k * k)
                         self.assertGreater(turtle, 100 * k * k)
         self.assertNotEqual(
-            caffe["capybara_sprite"](("nap", 0), False, 1).buf,
-            caffe["capybara_sprite"](("sit", 0, False), False, 1).buf,
+            caffe["capybara_sprite"](0, ("nap", 0), False, 1).buf,
+            caffe["capybara_sprite"](0, ("sit", 0, False), False, 1).buf,
+        )
+        self.assertNotEqual(  # each shell is its own
+            caffe["capybara_sprite"](0, ("sit", 0, False), False, 1).buf,
+            caffe["capybara_sprite"](1, ("sit", 0, False), False, 1).buf,
         )
 
-    def test_feeding_selects_lettuce_and_preserves_limits(self):
+    def test_feeding_gives_an_apple_and_preserves_limits(self):
         state = bar()
         cat = state["cat"]
         for now in (0, 10, 20):
@@ -315,19 +278,18 @@ class CapybaraModeTests(unittest.TestCase):
             self.assertEqual(cat.mode, "eat")
             self.assertEqual(cat.until, now + 2.4)
             self.assertEqual(cat.plan, [("sit", 1.5)])
-            self.assertEqual(state["toast"][0], f"{cat.name} munches lettuce.")
+            self.assertEqual(state["toast"][0], f"{cat.name} munches an apple.")
             for bites in range(4):
-                self.assertEqual(
-                    place(cat, now + bites * 0.6 + 0.01)[("cat", "treat")][0],
-                    ("lettuce", bites, 1.0),
-                )
+                pics = place(cat, now + bites * 0.6 + 0.01)
+                self.assertEqual(pics["cat"][0][2][:2], ("eat", bites))  # the apple in its paw
+                self.assertNotIn(("cat", "treat"), pics)  # no fish on the table
         with patch("time.time", return_value=30):
             caffe["on_key"](state, "f")
         self.assertEqual(cat.fed, [0, 10, 20])
         self.assertIn("is full", state["toast"][0])
         cat.step(22.4, 80, False, 5)
         self.assertEqual(cat.mode, "sit")
-        self.assertNotIn(("cat", "treat"), place(cat, 22.4))
+        self.assertEqual(place(cat, 22.4)["cat"][0][2][0], "sit")
         self.assertFalse(cat.feed(599.99))
         self.assertTrue(cat.feed(600))
         self.assertEqual(cat.fed, [0, 10, 20, 600])
@@ -344,17 +306,66 @@ class CapybaraModeTests(unittest.TestCase):
         for text in (f"Tip for {cat.name}", "1 pet", "4 treats"):
             self.assertIn(text, out.getvalue())
 
-    def test_lettuce_disappears_progressively_with_bites(self):
-        for k in (1.0, 2 / 3):
-            images = [caffe["SPRITES"]["lettuce"](bites, k) for bites in range(4)]
-            for img in images:
-                self.assertEqual((img.cols, img.rows), (math.ceil(2 * k), 1))
-            areas = [sum(a > 200 for a in img.buf[3::4]) for img in images]
-            self.assertGreater(areas[-1], 0)
-            self.assertTrue(all(a > b for a, b in zip(areas, areas[1:])), areas)
-            for before, after in zip(images, images[1:]):
-                self.assertTrue(all(b <= a for a, b in zip(before.buf[3::4], after.buf[3::4])))
-            self.assertNotEqual(images[0].buf, caffe["treat_sprite"](0, k).buf)
+    def test_apps_get_boba_tea_in_their_colour(self):
+        app = (40, "vscode")
+        state = bar(live={app: ("vscode", "app:VS Code", 0, 4, 64)})
+        glaze = caffe["DRINKS"]["vscode"][2]
+        self.assertEqual(caffe["cup_look"](state, app, 5, 1.0)[:3], ("boba", glaze, "busy"))
+        state["cat"].species = "cat"
+        self.assertEqual(caffe["cup_look"](state, app, 5, 1.0)[0], "latte")
+        state["cat"].species = "capybara"
+        teas = {}
+        for kind in ("vscode", "codex"):
+            img = caffe["boba_sprite"](caffe["DRINKS"][kind][2], "open", 0)
+            i = (int(30 * 2) * img.w + int(caffe["CUP_X"] * 2) - 6) * 4  # mid-glass tea
+            teas[kind] = tuple(img.buf[i : i + 3])
+        self.assertNotEqual(teas["vscode"], teas["codex"])
+        self.assertGreater(teas["codex"][2], teas["codex"][0])  # Codex's tea is blue
+        for look in ("open", "busy", "pour", "drain", "empty"):
+            self.assertTrue(any(caffe["boba_sprite"](glaze, look, 4).buf[3::4]), look)
+        state["live"] = {}
+        state["leaving"][app] = ("vscode", "app:VS Code", 5, 0)
+        state["knocked"][app] = 6
+        knock = caffe["cup_look"](state, app, 6.5, 1.0)
+        self.assertEqual((knock[0], knock[-1]), ("knock", "boba"))
+        caffe["SPRITES"][knock[0]](*knock[1:])
+        state["cat"].target, state["cat"].errand, state["cat"].mode = app, "knock", "sit"
+        del state["knocked"][app]
+        caffe["cat_visit"](state, 7)
+        self.assertIn("knocked VS Code's boba tea off", state["toast"][0])
+
+    def test_a_closed_apps_drink_stays_what_it_was_served(self):
+        app = (40, "vscode")
+        state = bar(
+            live={app: ("vscode", "app:VS Code", 0, 4, 64)},
+            initialized=True,
+            orders={},
+            agent_time=0,
+            longest=(0, ""),
+        )
+        caffe["take_orders"](state, {}, 5)
+        state["live"] = {}
+        state["cat"].species = "cat"  # the barista changes while the glass drains
+        self.assertEqual(caffe["cup_look"](state, app, 5.5, 1.0)[0], "boba")
+        state["knocked"][app] = 6
+        self.assertEqual(caffe["cup_look"](state, app, 6.5, 1.0)[-1], "boba")
+        with (
+            patch.dict(GLOBALS, scan_agents=lambda: {}, scan_copilot_sessions=lambda: {}),
+            patch("time.time", return_value=60),
+        ):
+            caffe["update"](state)
+        self.assertNotIn(app, state["leaving"])
+        self.assertEqual(state["drinks"], {})
+
+    def test_apple_disappears_progressively_with_bites(self):
+        def red(bites):
+            img = caffe["capybara_sprite"](0, ("eat", bites, 0), False, 1.0)
+            px = [img.buf[i : i + 4] for i in range(0, len(img.buf), 4)]
+            return sum(a > 200 and r > 200 and g < 90 and b < 90 for r, g, b, a in px)
+
+        areas = [red(bites) for bites in range(4)]
+        self.assertGreater(areas[-1], 0)
+        self.assertTrue(all(a > b for a, b in zip(areas, areas[1:])), areas)
 
     def test_capybara_completes_cup_cleanup(self):
         state = bar(
@@ -410,7 +421,7 @@ class CapybaraModeTests(unittest.TestCase):
                         self.assertEqual(pics, {})
                         continue
                     self.assertEqual(pics["cat"][0][0], "capybara")
-                    self.assertEqual(pics[("cat", "treat")][0][0], "lettuce")
+                    self.assertEqual(pics["cat"][0][2][0], "eat")
                     for key, x, y, _ in pics.values():
                         img = caffe["SPRITES"][key[0]](*key[1:])
                         self.assertGreaterEqual(x, 0)
