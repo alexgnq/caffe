@@ -30,8 +30,9 @@ starts with it.
 Set CAFFE_BOARD_URL to put your bar on a caffe board
 (https://github.com/alexgnq/caffe-board): every 10 seconds caffe sends its
 cards, tally and cat, and closes the bar when you quit. Project names and
-session titles are left out unless CAFFE_BOARD_PROJECTS is set. CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one,
-and CAFFE_BOARD_NAME names the bar (the cat's name otherwise).
+session titles are left out unless CAFFE_BOARD_PROJECTS is set.
+CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one, and
+CAFFE_BOARD_NAME names the bar (the cat's name otherwise).
 
 `caffe update` installs upstream over this copy, replacing local customizations.
 """
