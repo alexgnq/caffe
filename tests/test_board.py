@@ -43,13 +43,27 @@ class BoardSnapshotTest(unittest.TestCase):
         sessions = caffe["board_snapshot"](state, 10.0)["sessions"]
         self.assertEqual([s["agent"] for s in sessions], ["copilot"])
 
-    def test_open_apps_and_unknown_agents_stay_off_the_board(self):
+    def test_open_apps_come_after_sessions_as_busy_or_open(self):
         state = bar(
             {
-                (7, "vscode"): ("vscode", "app:VS Code", 0, 1.0, 100),
-                "t3:x": ("t3", "ttys002", 0, 0.0, 0),
+                (7, "vscode"): ("vscode", "app:VS Code", 0, 5.0, 1100),
+                (8, "codex"): ("codex", "app:Codex", 40, 0.0, 1200),
+                101: ("claude", "ttys001", 0, 0.0, 0),
             }
         )
+        sessions = caffe["board_snapshot"](state, 100.0)["sessions"]
+        self.assertEqual(
+            sessions[1:],
+            [
+                {"kind": "app", "agent": "vscode", "state": "busy", "since": 100},
+                {"kind": "app", "agent": "codex", "state": "open", "since": 60},
+            ],
+        )
+        self.assertEqual(sessions[0]["agent"], "claude")
+        self.assertNotIn("kind", sessions[0])
+
+    def test_unknown_agents_stay_off_the_board(self):
+        state = bar({"t3:x": ("t3", "ttys002", 0, 0.0, 0)})
         self.assertEqual(caffe["board_snapshot"](state, 10.0), {"sessions": []})
 
 

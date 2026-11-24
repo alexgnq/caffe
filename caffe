@@ -29,8 +29,8 @@ starts with it.
 
 Set CAFFE_BOARD_URL to put your bar on a caffe board
 (https://github.com/alexgnq/caffe-board): every 10 seconds caffe sends each
-session's agent and state, never project names, and closes the bar when you
-quit. CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one,
+session's agent and state and each open app, never project names, and closes
+the bar when you quit. CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one,
 and CAFFE_BOARD_NAME names the bar (the cat's name otherwise).
 
 `caffe update` installs upstream over this copy, replacing local customizations.
@@ -503,8 +503,9 @@ def agent_sessions(out, commands, now):
 
 
 def board_snapshot(state, now):
-    """The bar's sessions as the board shows them: each one's agent and state,
-    and nothing about its project, so no repo names leave the Mac."""
+    """The bar as the board shows it: each session's agent and state, then each
+    open app, busy or open. Nothing about projects, titles or resources, so no
+    repo names leave the Mac."""
     sessions = []
     for pid in brewable(state):
         kind = state["live"][pid][0]
@@ -513,6 +514,13 @@ def board_snapshot(state, now):
             continue
         word, since = session_state(state, pid, now)
         sessions.append({"agent": agent, "state": word, "since": round(now - since)})
+    for session in state["live"].values():
+        kind, _, started, cpu, _ = session
+        if is_app(session) and kind in DRINKS:
+            word = "busy" if cpu >= WORKING_CPU else "open"
+            sessions.append(
+                {"kind": "app", "agent": kind, "state": word, "since": round(now - started)}
+            )
     return {"sessions": sessions}
 
 

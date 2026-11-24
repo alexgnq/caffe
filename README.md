@@ -138,7 +138,8 @@ CAFFE_BOARD_URL=https://your-board.example caffe
 ```
 
 Every 10 seconds caffe sends each session's agent and state (brewing, ready,
-idle or cold). It never sends project names, titles or paths. The bar closes
+idle or cold), and each open app, busy or open. It never sends project names,
+titles, paths or resource use. The bar closes
 when you quit. `CAFFE_BOARD_TOKEN` is sent as a bearer token if the board asks
 for one, and `CAFFE_BOARD_NAME` names your bar (the cat's name otherwise).
 
