@@ -127,6 +127,22 @@ caffe update
 `caffe update` installs the upstream version and replaces local customizations,
 including Copilot session tracking and app resource reporting.
 
+### Put your bar on a caffe board
+
+[caffe board](https://github.com/alexgnq/caffe-board) is a web page that shows
+the caffe tables in a room. Point caffe at one and your bar shows up there the
+way it looks in the terminal: the same cards with the same lines, the tally,
+how long the bar has been awake, and your cat, coat and all.
+
+```sh
+CAFFE_BOARD_URL=https://your-board.example caffe
+```
+
+caffe sends the bar every 10 seconds and closes it when you quit. Project names
+and session titles stay on your Mac unless you set `CAFFE_BOARD_PROJECTS=1`.
+`CAFFE_BOARD_TOKEN` is sent as a bearer token if the board asks for one, and
+`CAFFE_BOARD_NAME` names your bar (the cat's name otherwise).
+
 ## How it works
 
 - Every 3 seconds, `ps` is checked for `copilot`, `codex`, `claude`, `pi` and

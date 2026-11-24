@@ -27,11 +27,19 @@ them, serves apps boba tea in their colour
 instead of lattes, and its visitors are capybaras too. `caffe --capybara`
 starts with it.
 
+Set CAFFE_BOARD_URL to put your bar on a caffe board
+(https://github.com/alexgnq/caffe-board): every 10 seconds caffe sends its
+cards, tally and cat, and closes the bar when you quit. Project names and
+session titles are left out unless CAFFE_BOARD_PROJECTS is set.
+CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one, and
+CAFFE_BOARD_NAME names the bar (the cat's name otherwise).
+
 `caffe update` installs upstream over this copy, replacing local customizations.
 """
 
 import base64
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -44,8 +52,11 @@ import sqlite3
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
+import urllib.parse
+import urllib.request
 import zlib
 from contextlib import closing
 from pathlib import Path
@@ -80,6 +91,10 @@ CODEX_CALLS = (
     "function_call_output",
     "custom_tool_call_output",
 )
+BOARD_URL = os.environ.get("CAFFE_BOARD_URL", "").rstrip("/")
+BOARD_TOKEN = os.environ.get("CAFFE_BOARD_TOKEN", "")
+BOARD_PROJECTS = bool(os.environ.get("CAFFE_BOARD_PROJECTS"))  # also send project names
+BOARD_EVERY_S = 10.0  # how often the board hears from this bar
 SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
 GOLD = c256(220)
@@ -490,6 +505,107 @@ def agent_sessions(out, commands, now):
     return sessions
 
 
+def board_snapshot(state, now):
+    """The bar as the terminal shows it: the cat, the tally, and each card's
+    lines in card order. Project names and session titles stay on the Mac
+    unless CAFFE_BOARD_PROJECTS is set."""
+    cat = state["cat"]
+    coat = COATS[cat.coat]
+    cards = []
+    for pid in card_order(state, now):
+        leaving = pid in state["leaving"]
+        cup = state["leaving"][pid] if leaving else state["live"][pid]
+        app = is_app(cup)
+        name, where = card_name(state, pid, cup)
+        _, status, note = (plain(line) for line in card_lines(state, pid, now, 200))
+        if leaving:
+            word = "closed" if app else "served"
+        elif poured(state, pid, now) is not None:
+            word = "pouring"
+        elif app:
+            word = "busy" if cup[3] >= WORKING_CPU else "open"
+        else:
+            word = session_state(state, pid, now)[0]
+        kind = cup[0]
+        cards.append(
+            {
+                "id": hashlib.sha256(f"{state['order']}:{pid}".encode()).hexdigest()[:10],
+                "kind": "app" if app else "session",
+                "agent": "copilot" if kind == COPILOT_SESSION_KIND else kind,
+                "name": name,
+                "where": where if app or BOARD_PROJECTS else "",
+                "state": word,
+                "status": status,
+                "note": note,
+            }
+        )
+    return {
+        "cat": {
+            "name": cat.name,
+            "title": cat.title,
+            "coat": "#" + bytes(coat[1]).hex(),
+            "shade": "#" + bytes(coat[2]).hex(),
+            "eyes": "#" + bytes(coat[4]).hex(),
+        },
+        "tally": tally(state, now),
+        "awake": round(now - state["start"]),
+        "cards": cards,
+    }
+
+
+def board_request(method, name, body=None, timeout=5.0):
+    """Send one request about this bar to the board. Whether it worked."""
+    if not BOARD_URL.startswith(("https://", "http://")):
+        return False
+    request = urllib.request.Request(  # noqa: S310 - http(s) only, checked above
+        f"{BOARD_URL}/api/bars/{urllib.parse.quote(name, safe='')}",
+        data=None if body is None else json.dumps(body).encode(),
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    if BOARD_TOKEN:
+        request.add_header("Authorization", f"Bearer {BOARD_TOKEN}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):  # noqa: S310
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def board_name(state):
+    return os.environ.get("CAFFE_BOARD_NAME") or state["cat"].name
+
+
+def report_to_board(state, now):
+    """Every BOARD_EVERY_S, send the bar to the board from a background thread,
+    so a slow board never holds up the table. Say so when the bar goes live or
+    drops off."""
+    sending = state.get("board_thread")
+    if not BOARD_URL or now - state.get("board_at", 0.0) < BOARD_EVERY_S:
+        return
+    if sending and sending.is_alive():
+        return
+    state["board_at"] = now
+    live = state.get("board_live")
+    if live is not None and live != state.get("board_told"):
+        state["board_told"] = live
+        message = "Your bar is on the board ☕" if live else "Can't reach the board. Still trying."
+        state["toast"] = (message, now + 4)
+    name, body = board_name(state), board_snapshot(state, now)
+
+    def send():
+        state["board_live"] = board_request("PUT", name, body)
+
+    state["board_thread"] = threading.Thread(target=send, daemon=True)
+    state["board_thread"].start()
+
+
+def close_board(state):
+    """Take the bar off the board when caffe closes, without keeping you waiting."""
+    if BOARD_URL:
+        board_request("DELETE", board_name(state), timeout=2.0)
+
+
 def fmt_mem(mb):
     """Format resident memory in compact MiB/GiB units."""
     return f"{mb / 1024:.1f}G" if mb >= 1024 else f"{mb:.0f}M"
@@ -584,8 +700,13 @@ def fmt_since(sec):
     return f"{sec}s"
 
 
+def plain(s):
+    """Text without its terminal colours."""
+    return re.sub(r"\033\[[\d;]*m", "", s)
+
+
 def visible_len(s):
-    return len(re.sub(r"\033\[[\d;]*m", "", s))
+    return len(plain(s))
 
 
 def pad(s, width):
@@ -2032,18 +2153,24 @@ def card_lines(state, pid, now, width):
     return [title, status, card_note(state, pid, cup, word, since)]
 
 
+def card_name(state, pid, cup):
+    """What a card is: the agent or app, and its project, title or "app"."""
+    kind, source = cup[:2]
+    name = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][0]
+    if kind == COPILOT_SESSION_KIND:
+        return "Agent", source
+    if str(pid).startswith("t3:"):
+        return name, source  # a T3 Code session's title
+    if is_app(cup):
+        return name, "app"
+    return name, state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+
+
 def card_title(state, pid, cup, width):
     """A card's first line: the agent or app, then its project, title or "app"."""
-    kind, source = cup[:2]
-    name, color, _ = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind]
-    if kind == COPILOT_SESSION_KIND:
-        name, where = "Agent", source
-    elif str(pid).startswith("t3:"):
-        where = source  # a T3 Code session's title
-    elif is_app(cup):
-        where = "app"
-    else:
-        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+    kind = cup[0]
+    color = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][1]
+    name, where = card_name(state, pid, cup)
     name = trim(name, width)
     title = f"{color}{BOLD}{name}{RESET}"
     if width - len(name) > 2:
@@ -2872,6 +2999,7 @@ def main():
             if now - last_poll >= POLL_S:
                 update(state)
                 last_poll = now
+            report_to_board(state, now)
             if now - last_power >= BATTERY_POLL_S:  # after update, so its toast stays up
                 caf, last_power = check_power(state, caf), now
             if resized[0]:
@@ -2894,6 +3022,7 @@ def main():
         sys.stdout.write("\033[?7h\033[?25h\033[?1049l\033[23;2t")
         sys.stdout.flush()
         caf.terminate()
+        close_board(state)
         receipt(state, time.time())
 
 
