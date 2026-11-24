@@ -86,6 +86,14 @@ class BoardSnapshotTest(unittest.TestCase):
         self.assertEqual(card["state"], "served")
         self.assertTrue(card["status"].startswith("✔ served"))
 
+    def test_capybara_mode_sends_the_capybara_and_its_turtle(self):
+        state = bar({101: ("claude", "ttys001", 0, 0.0, 0)})
+        state["cat"].species = "capybara"
+        sent = caffe["board_snapshot"](state, 30.0)["cat"]
+        self.assertEqual(sent["kind"], "capybara")
+        self.assertEqual(sent["title"], f"{state['cat'].name} the capybara")
+        self.assertRegex(sent["shell"], r"^#[0-9a-f]{6}$")
+
     def test_the_cat_tally_and_card_ids_match_the_terminal(self):
         state = bar({101: ("claude", "ttys001", 0, 0.0, 0), 102: ("pi", "ttys002", 0, 0.0, 0)})
         first = caffe["board_snapshot"](state, 30.0)
@@ -93,6 +101,7 @@ class BoardSnapshotTest(unittest.TestCase):
         self.assertEqual(first["cat"]["name"], state["cat"].name)
         self.assertEqual(first["cat"]["title"], state["cat"].title)
         self.assertRegex(first["cat"]["coat"], r"^#[0-9a-f]{6}$")
+        self.assertEqual(first["cat"]["kind"], "cat")
         self.assertEqual(first["tally"], caffe["tally"](state, 30.0))
         self.assertEqual(first["awake"], 30)
         ids = [c["id"] for c in first["cards"]]

@@ -541,11 +541,13 @@ def board_snapshot(state, now):
         )
     return {
         "cat": {
+            "kind": cat.species,
             "name": cat.name,
             "title": cat.title,
             "coat": "#" + bytes(coat[1]).hex(),
             "shade": "#" + bytes(coat[2]).hex(),
             "eyes": "#" + bytes(coat[4]).hex(),
+            "shell": "#" + bytes(SHELLS[cat.coat % len(SHELLS)]).hex(),
         },
         "tally": tally(state, now),
         "awake": round(now - state["start"]),
