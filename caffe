@@ -28,9 +28,9 @@ instead of lattes, and its visitors are capybaras too. `caffe --capybara`
 starts with it.
 
 Set CAFFE_BOARD_URL to put your bar on a caffe board
-(https://github.com/alexgnq/caffe-board): every 10 seconds caffe sends each
-session's agent and state and each open app, never project names, and closes
-the bar when you quit. CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one,
+(https://github.com/alexgnq/caffe-board): every 10 seconds caffe sends its
+cards, tally and cat, and closes the bar when you quit. Project names and
+session titles are left out unless CAFFE_BOARD_PROJECTS is set. CAFFE_BOARD_TOKEN is sent as a bearer token if the board asks for one,
 and CAFFE_BOARD_NAME names the bar (the cat's name otherwise).
 
 `caffe update` installs upstream over this copy, replacing local customizations.
@@ -38,6 +38,7 @@ and CAFFE_BOARD_NAME names the bar (the cat's name otherwise).
 
 import base64
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -91,6 +92,7 @@ CODEX_CALLS = (
 )
 BOARD_URL = os.environ.get("CAFFE_BOARD_URL", "").rstrip("/")
 BOARD_TOKEN = os.environ.get("CAFFE_BOARD_TOKEN", "")
+BOARD_PROJECTS = bool(os.environ.get("CAFFE_BOARD_PROJECTS"))  # also send project names
 BOARD_EVERY_S = 10.0  # how often the board hears from this bar
 SERVED_GLAZE = (150, 150, 158)
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
@@ -503,25 +505,51 @@ def agent_sessions(out, commands, now):
 
 
 def board_snapshot(state, now):
-    """The bar as the board shows it: each session's agent and state, then each
-    open app, busy or open. Nothing about projects, titles or resources, so no
-    repo names leave the Mac."""
-    sessions = []
-    for pid in brewable(state):
-        kind = state["live"][pid][0]
-        agent = "copilot" if kind == COPILOT_SESSION_KIND else kind
-        if agent not in AGENTS:
-            continue
-        word, since = session_state(state, pid, now)
-        sessions.append({"agent": agent, "state": word, "since": round(now - since)})
-    for session in state["live"].values():
-        kind, _, started, cpu, _ = session
-        if is_app(session) and kind in DRINKS:
-            word = "busy" if cpu >= WORKING_CPU else "open"
-            sessions.append(
-                {"kind": "app", "agent": kind, "state": word, "since": round(now - started)}
-            )
-    return {"sessions": sessions}
+    """The bar as the terminal shows it: the cat, the tally, and each card's
+    lines in card order. Project names and session titles stay on the Mac
+    unless CAFFE_BOARD_PROJECTS is set."""
+    cat = state["cat"]
+    coat = COATS[cat.coat]
+    cards = []
+    for pid in card_order(state, now):
+        leaving = pid in state["leaving"]
+        cup = state["leaving"][pid] if leaving else state["live"][pid]
+        app = is_app(cup)
+        name, where = card_name(state, pid, cup)
+        _, status, note = (plain(line) for line in card_lines(state, pid, now, 200))
+        if leaving:
+            word = "closed" if app else "served"
+        elif poured(state, pid, now) is not None:
+            word = "pouring"
+        elif app:
+            word = "busy" if cup[3] >= WORKING_CPU else "open"
+        else:
+            word = session_state(state, pid, now)[0]
+        kind = cup[0]
+        cards.append(
+            {
+                "id": hashlib.sha256(f"{state['order']}:{pid}".encode()).hexdigest()[:10],
+                "kind": "app" if app else "session",
+                "agent": "copilot" if kind == COPILOT_SESSION_KIND else kind,
+                "name": name,
+                "where": where if app or BOARD_PROJECTS else "",
+                "state": word,
+                "status": status,
+                "note": note,
+            }
+        )
+    return {
+        "cat": {
+            "name": cat.name,
+            "title": cat.title,
+            "coat": "#" + bytes(coat[1]).hex(),
+            "shade": "#" + bytes(coat[2]).hex(),
+            "eyes": "#" + bytes(coat[4]).hex(),
+        },
+        "tally": tally(state, now),
+        "awake": round(now - state["start"]),
+        "cards": cards,
+    }
 
 
 def board_request(method, name, body=None, timeout=5.0):
@@ -671,8 +699,13 @@ def fmt_since(sec):
     return f"{sec}s"
 
 
+def plain(s):
+    """Text without its terminal colours."""
+    return re.sub(r"\033\[[\d;]*m", "", s)
+
+
 def visible_len(s):
-    return len(re.sub(r"\033\[[\d;]*m", "", s))
+    return len(plain(s))
 
 
 def pad(s, width):
@@ -2119,18 +2152,24 @@ def card_lines(state, pid, now, width):
     return [title, status, card_note(state, pid, cup, word, since)]
 
 
+def card_name(state, pid, cup):
+    """What a card is: the agent or app, and its project, title or "app"."""
+    kind, source = cup[:2]
+    name = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][0]
+    if kind == COPILOT_SESSION_KIND:
+        return "Agent", source
+    if str(pid).startswith("t3:"):
+        return name, source  # a T3 Code session's title
+    if is_app(cup):
+        return name, "app"
+    return name, state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+
+
 def card_title(state, pid, cup, width):
     """A card's first line: the agent or app, then its project, title or "app"."""
-    kind, source = cup[:2]
-    name, color, _ = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind]
-    if kind == COPILOT_SESSION_KIND:
-        name, where = "Agent", source
-    elif str(pid).startswith("t3:"):
-        where = source  # a T3 Code session's title
-    elif is_app(cup):
-        where = "app"
-    else:
-        where = state.get("projects", {}).get(pid) or source.replace("ttys", "s")
+    kind = cup[0]
+    color = DRINKS["copilot" if kind == COPILOT_SESSION_KIND else kind][1]
+    name, where = card_name(state, pid, cup)
     name = trim(name, width)
     title = f"{color}{BOLD}{name}{RESET}"
     if width - len(name) > 2:

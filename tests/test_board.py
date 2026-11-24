@@ -11,7 +11,12 @@ GLOBALS = caffe["update"].__globals__
 
 def bar(live):
     return {
+        "start": 0.0,
+        "order": 42,
         "live": live,
+        "leaving": {},
+        "knocked": {},
+        "gfx": True,
         "first_seen": dict.fromkeys(live, 0.0),
         "activity": {},
         "cat": caffe["Cat"](0, caffe["HOME_X"]),
@@ -19,29 +24,41 @@ def bar(live):
 
 
 class BoardSnapshotTest(unittest.TestCase):
-    def test_sends_only_agent_state_and_time(self):
+    def test_mirrors_the_card_without_project_names(self):
         state = bar({101: ("claude", "ttys001", 0, 0.0, 0)})
         state["cwds"] = {101: "/Users/me/code/secret-project"}
         state["projects"] = {101: "secret-project"}
         snapshot = caffe["board_snapshot"](state, 120.0)
+        card = snapshot["cards"][0]
         self.assertEqual(
-            snapshot, {"sessions": [{"agent": "claude", "state": "idle", "since": 120}]}
+            (card["kind"], card["agent"], card["name"], card["where"], card["state"]),
+            ("session", "claude", "Claude", "", "idle"),
         )
+        self.assertTrue(card["status"].startswith("idle "))
+        self.assertTrue(card["note"].startswith("quiet since "))
         self.assertNotIn("secret", json.dumps(snapshot))
+        self.assertNotIn("\\u001b", json.dumps(snapshot))  # no terminal colours
 
-    def test_brewing_session_reports_when_it_started(self):
+    def test_sends_project_names_when_asked(self):
+        state = bar({101: ("claude", "ttys001", 0, 0.0, 0)})
+        state["projects"] = {101: "caffe"}
+        with patch.dict(GLOBALS, BOARD_PROJECTS=True):
+            card = caffe["board_snapshot"](state, 120.0)["cards"][0]
+        self.assertEqual(card["where"], "caffe")
+
+    def test_brewing_session(self):
         state = bar({101: ("codex", "ttys001", 0, 50.0, 0)})
         state["activity"] = {101: (90.0, 100.0)}
-        snapshot = caffe["board_snapshot"](state, 110.0)
-        self.assertEqual(
-            snapshot["sessions"], [{"agent": "codex", "state": "brewing", "since": 20}]
-        )
+        card = caffe["board_snapshot"](state, 110.0)["cards"][0]
+        self.assertEqual(card["state"], "brewing")
+        self.assertTrue(card["status"].startswith("brewing "))
+        self.assertEqual(card["note"], "50% cpu")
 
-    def test_copilot_app_sessions_count_as_copilot(self):
+    def test_copilot_app_sessions_keep_their_titles_private(self):
         kind = caffe["COPILOT_SESSION_KIND"]
         state = bar({"copilot:abc": (kind, "Fix the build", 0, 0.0, 0)})
-        sessions = caffe["board_snapshot"](state, 10.0)["sessions"]
-        self.assertEqual([s["agent"] for s in sessions], ["copilot"])
+        card = caffe["board_snapshot"](state, 10.0)["cards"][0]
+        self.assertEqual((card["agent"], card["name"], card["where"]), ("copilot", "Agent", ""))
 
     def test_open_apps_come_after_sessions_as_busy_or_open(self):
         state = bar(
@@ -51,20 +68,36 @@ class BoardSnapshotTest(unittest.TestCase):
                 101: ("claude", "ttys001", 0, 0.0, 0),
             }
         )
-        sessions = caffe["board_snapshot"](state, 100.0)["sessions"]
+        cards = caffe["board_snapshot"](state, 100.0)["cards"]
         self.assertEqual(
-            sessions[1:],
+            [(c["kind"], c["name"], c["where"], c["state"]) for c in cards],
             [
-                {"kind": "app", "agent": "vscode", "state": "busy", "since": 100},
-                {"kind": "app", "agent": "codex", "state": "open", "since": 60},
+                ("session", "Claude", "", "idle"),
+                ("app", "VS Code", "app", "busy"),
+                ("app", "Codex", "app", "open"),
             ],
         )
-        self.assertEqual(sessions[0]["agent"], "claude")
-        self.assertNotIn("kind", sessions[0])
+        self.assertTrue(cards[1]["status"].startswith("busy 5% · "))
 
-    def test_unknown_agents_stay_off_the_board(self):
-        state = bar({"t3:x": ("t3", "ttys002", 0, 0.0, 0)})
-        self.assertEqual(caffe["board_snapshot"](state, 10.0), {"sessions": []})
+    def test_served_cups_stay_until_they_are_cleared(self):
+        state = bar({})
+        state["leaving"] = {101: ("claude", "ttys001", 95.0, 0.0)}
+        card = caffe["board_snapshot"](state, 100.0)["cards"][0]
+        self.assertEqual(card["state"], "served")
+        self.assertTrue(card["status"].startswith("✔ served"))
+
+    def test_the_cat_tally_and_card_ids_match_the_terminal(self):
+        state = bar({101: ("claude", "ttys001", 0, 0.0, 0), 102: ("pi", "ttys002", 0, 0.0, 0)})
+        first = caffe["board_snapshot"](state, 30.0)
+        again = caffe["board_snapshot"](state, 40.0)
+        self.assertEqual(first["cat"]["name"], state["cat"].name)
+        self.assertEqual(first["cat"]["title"], state["cat"].title)
+        self.assertRegex(first["cat"]["coat"], r"^#[0-9a-f]{6}$")
+        self.assertEqual(first["tally"], caffe["tally"](state, 30.0))
+        self.assertEqual(first["awake"], 30)
+        ids = [c["id"] for c in first["cards"]]
+        self.assertEqual(ids, [c["id"] for c in again["cards"]])
+        self.assertEqual(len(set(ids)), 2)
 
 
 class BoardRequestTest(unittest.TestCase):
@@ -131,7 +164,8 @@ class ReportToBoardTest(unittest.TestCase):
             caffe["report_to_board"](state, 111.0)
             state["board_thread"].join()
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0], ("PUT", state["cat"].name, {"sessions": []}))
+        self.assertEqual(calls[0][:2], ("PUT", state["cat"].name))
+        self.assertEqual(calls[0][2]["cards"], [])
         self.assertEqual(state["toast"][0], "Your bar is on the board ☕")
 
     def test_does_nothing_without_a_board(self):
